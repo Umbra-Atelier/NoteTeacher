@@ -29,6 +29,7 @@ interface ScientificCalculatorBoxProps {
   isActive: boolean;
   zoomScale?: number;
   disableTwoFingerPinch?: boolean;
+  allowFingerControls?: boolean;
   isReadOnly?: boolean;
   hideChrome?: boolean;
   onSelect: () => void;
@@ -46,6 +47,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
   isActive,
   zoomScale = 1,
   disableTwoFingerPinch = false,
+  allowFingerControls = true,
   isReadOnly = false,
   hideChrome = false,
   onSelect,
@@ -81,6 +83,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
   const pinchStartScaleRef = useRef<number>(box.scale || 1);
   const containerRef = useRef<HTMLDivElement>(null);
   const logicalStageRef = useRef<HTMLDivElement>(null);
+  const lastPointerTypeRef = useRef<string>('mouse');
   const boxRef = useRef(box);
   boxRef.current = box;
   const lastSyncedRef = useRef<{ expr: string; res: string }>({
@@ -156,22 +159,14 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
   };
 
   // Smooth rAF Drag Moving via Top-Left Move handle
-  const handleMouseDownMove = (e: React.MouseEvent) => {
+  const handlePointerDownMove = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
     e.preventDefault();
     e.stopPropagation();
+    onSelect();
     setDragStart({ x: e.clientX, y: e.clientY, boxX: box.x, boxY: box.y });
     setIsRepositioningActive(true);
     setIsDragging(true);
-  };
-
-  const handleTouchStartMove = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      const t = e.touches[0];
-      setDragStart({ x: t.clientX, y: t.clientY, boxX: box.x, boxY: box.y });
-      setIsRepositioningActive(true);
-      setIsDragging(true);
-    }
   };
 
   useEffect(() => {
@@ -200,12 +195,9 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       }
     };
 
-    const handleMouseMove = (e: MouseEvent) => scheduleMove(e.clientX, e.clientY);
-    const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        e.preventDefault();
-        scheduleMove(e.touches[0].clientX, e.touches[0].clientY);
-      }
+    const handlePointerMove = (e: PointerEvent) => {
+      e.preventDefault();
+      scheduleMove(e.clientX, e.clientY);
     };
     const handleUp = () => {
       if (rafId) cancelAnimationFrame(rafId);
@@ -213,16 +205,14 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       setIsRepositioningActive(false);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleUp);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleUp);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleUp);
+    window.addEventListener('pointercancel', handleUp);
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleUp);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleUp);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handleUp);
+      window.removeEventListener('pointercancel', handleUp);
     };
   }, [isDragging, dragStart, onUpdate, zoomScale]);
 
@@ -232,7 +222,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
     if (!el) return;
 
     const handleTouchStart = (e: TouchEvent) => {
-      if (disableTwoFingerPinch) return;
+      if (disableTwoFingerPinch || !allowFingerControls) return;
       if (e.touches.length === 2) {
         e.preventDefault();
         const dist = Math.hypot(
@@ -245,7 +235,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
     };
 
     const handleTouchMove = (e: TouchEvent) => {
-      if (disableTwoFingerPinch) return;
+      if (disableTwoFingerPinch || !allowFingerControls) return;
       if (e.touches.length === 2 && pinchStartDistRef.current) {
         e.preventDefault();
         const dist = Math.hypot(
@@ -271,7 +261,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       el.removeEventListener('touchmove', handleTouchMove);
       el.removeEventListener('touchend', handleTouchEnd);
     };
-  }, [box.scale, onUpdate, disableTwoFingerPinch]);
+  }, [box.scale, onUpdate, disableTwoFingerPinch, allowFingerControls]);
 
   // Top-Right L-Grab Drag
   const startResizeTR = (startX: number, startY: number) => {
@@ -309,25 +299,20 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       if (!rafId) rafId = requestAnimationFrame(commitResize);
     };
 
-    const handleMouseMove = (ev: MouseEvent) => scheduleResize(ev.clientX, ev.clientY);
-    const handleTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) {
-        ev.preventDefault();
-        scheduleResize(ev.touches[0].clientX, ev.touches[0].clientY);
-      }
+    const handlePointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      scheduleResize(ev.clientX, ev.clientY);
     };
     const onUp = () => {
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', onUp);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', onUp);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', onUp);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   };
 
   // Bottom-Left L-Grab Drag
@@ -365,25 +350,20 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       if (!rafId) rafId = requestAnimationFrame(commitResize);
     };
 
-    const handleMouseMove = (ev: MouseEvent) => scheduleResize(ev.clientX, ev.clientY);
-    const handleTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) {
-        ev.preventDefault();
-        scheduleResize(ev.touches[0].clientX, ev.touches[0].clientY);
-      }
+    const handlePointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      scheduleResize(ev.clientX, ev.clientY);
     };
     const onUp = () => {
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', onUp);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', onUp);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', onUp);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   };
 
   // =========================================================================
@@ -1022,10 +1002,15 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       data-calc-box-id={box.id}
       data-active={isActive ? 'true' : 'false'}
       onClick={(e) => {
+        if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
         e.stopPropagation();
         onSelect();
       }}
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => {
+        lastPointerTypeRef.current = e.pointerType;
+        if (e.pointerType === 'touch' && !allowFingerControls) return;
+        e.stopPropagation();
+      }}
       className={`calculator-box absolute select-none shadow-2xl rounded-2xl border transition-shadow ${
         isActive
           ? 'ring-2 ring-emerald-500 border-emerald-400 z-40'
@@ -1047,21 +1032,16 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       {!hideChrome && (
         <div
           data-export-hide-clean="true"
-          onMouseDown={(e) => {
+          onPointerDown={(e) => {
+            if (e.pointerType === 'touch' && !allowFingerControls) return;
             e.preventDefault();
             e.stopPropagation();
+            onSelect();
             startResizeTR(e.clientX, e.clientY);
           }}
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            if (e.touches.length === 1) {
-              startResizeTR(e.touches[0].clientX, e.touches[0].clientY);
-            }
-          }}
-          onPointerDown={(e) => e.stopPropagation()}
           title="Drag L-handle to scale calculator & keys"
           style={{ touchAction: 'none' }}
-          className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto"
+          className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
         >
           <div className="w-5 h-5 border-t-3 border-r-3 border-emerald-400 rounded-tr-md bg-slate-900/95 shadow-md flex items-center justify-center group-hover:border-emerald-300">
             <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full" />
@@ -1073,21 +1053,16 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       {!hideChrome && (
         <div
           data-export-hide-clean="true"
-          onMouseDown={(e) => {
+          onPointerDown={(e) => {
+            if (e.pointerType === 'touch' && !allowFingerControls) return;
             e.preventDefault();
             e.stopPropagation();
+            onSelect();
             startResizeBL(e.clientX, e.clientY);
           }}
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            if (e.touches.length === 1) {
-              startResizeBL(e.touches[0].clientX, e.touches[0].clientY);
-            }
-          }}
-          onPointerDown={(e) => e.stopPropagation()}
           title="Drag L-handle to scale calculator & keys"
           style={{ touchAction: 'none' }}
-          className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto"
+          className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
         >
           <div className="w-5 h-5 border-b-3 border-l-3 border-emerald-400 rounded-bl-md bg-slate-900/95 shadow-md flex items-center justify-center group-hover:border-emerald-300">
             <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full" />
@@ -1114,12 +1089,10 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
             {!hideChrome && (
               <div
                 data-export-hide-clean="true"
-                onMouseDown={handleMouseDownMove}
-                onTouchStart={handleTouchStartMove}
-                onPointerDown={(e) => e.stopPropagation()}
+                onPointerDown={handlePointerDownMove}
                 style={{ touchAction: 'none' }}
                 title="Drag to reposition calculator"
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-md border text-xs font-bold cursor-grab active:cursor-grabbing select-none shadow-xs ${
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-md border text-xs font-bold cursor-grab active:cursor-grabbing select-none shadow-xs touch-none ${
                   isRepositioningActive
                     ? 'bg-emerald-600 text-white ring-2 ring-emerald-300 border-emerald-400'
                     : 'bg-emerald-950/80 border-emerald-600/70 text-emerald-300 hover:bg-emerald-900/80 hover:text-white'

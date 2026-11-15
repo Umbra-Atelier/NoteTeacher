@@ -165,18 +165,9 @@ export async function renderLowResPageCompositePreview(
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, thumbW, thumbH);
 
-  // 2. Base PDF low-res preview or paper template
-  const bgSrc =
-    page.template === 'pdf'
-      ? page.previewDataUrl || (page.pdfDataUrl && page.pdfDataUrl !== '__CACHED__' ? page.pdfDataUrl : undefined)
-      : undefined;
-
-  if (page.template === 'pdf' && bgSrc) {
-    const bgImg = await loadPreviewImg(bgSrc);
-    if (bgImg && bgImg.naturalWidth > 0) {
-      ctx.drawImage(bgImg, 0, 0, thumbW, thumbH);
-    }
-  } else if (page.template === 'lined') {
+  // 2. Base paper template (or PDF underlay) + PDF low-res preview
+  const paperPattern = page.template === 'pdf' ? page.underlayTemplate || 'blank' : page.template;
+  if (paperPattern === 'lined') {
     const step = 32 * scaleY;
     ctx.strokeStyle = 'rgba(147, 197, 253, 0.45)';
     ctx.lineWidth = 1;
@@ -191,7 +182,7 @@ export async function renderLowResPageCompositePreview(
     ctx.moveTo(96 * scaleX, 0);
     ctx.lineTo(96 * scaleX, thumbH);
     ctx.stroke();
-  } else if (page.template === 'grid' || page.template === 'graph') {
+  } else if (paperPattern === 'grid' || paperPattern === 'graph') {
     const stepX = Math.max(5, 24 * scaleX);
     const stepY = Math.max(5, 24 * scaleY);
     ctx.strokeStyle = 'rgba(59, 130, 246, 0.18)';
@@ -208,7 +199,7 @@ export async function renderLowResPageCompositePreview(
       ctx.lineTo(thumbW, y);
       ctx.stroke();
     }
-  } else if (page.template === 'dotted') {
+  } else if (paperPattern === 'dotted') {
     const stepX = Math.max(6, 24 * scaleX);
     const stepY = Math.max(6, 24 * scaleY);
     ctx.fillStyle = 'rgba(100, 116, 139, 0.35)';
@@ -216,6 +207,23 @@ export async function renderLowResPageCompositePreview(
       for (let y = stepY; y < thumbH; y += stepY) {
         ctx.fillRect(x - 0.5, y - 0.5, 1, 1);
       }
+    }
+  }
+
+  const bgSrc =
+    page.template === 'pdf'
+      ? page.previewDataUrl || (page.pdfDataUrl && page.pdfDataUrl !== '__CACHED__' ? page.pdfDataUrl : undefined)
+      : undefined;
+
+  if (page.template === 'pdf' && bgSrc) {
+    const bgImg = await loadPreviewImg(bgSrc);
+    if (bgImg && bgImg.naturalWidth > 0) {
+      ctx.save();
+      if (paperPattern !== 'blank') {
+        ctx.globalCompositeOperation = 'multiply';
+      }
+      ctx.drawImage(bgImg, 0, 0, thumbW, thumbH);
+      ctx.restore();
     }
   }
 

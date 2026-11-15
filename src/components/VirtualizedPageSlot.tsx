@@ -37,6 +37,9 @@ interface VirtualizedPageSlotProps {
   scrollContainerRef: React.RefObject<HTMLElement | null>;
   onRegisterPageElement: (pageId: string, el: HTMLDivElement | null) => void;
   onActivatePage: (pageId: string) => void;
+  regularWidthPx?: number;
+  povScale?: number;
+  isFullPovMode?: boolean;
 
   // Shared workspace state & tool props
   mode: AppMode;
@@ -161,6 +164,9 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   scrollContainerRef,
   onRegisterPageElement,
   onActivatePage,
+  regularWidthPx,
+  povScale = 1,
+  isFullPovMode = false,
   mode,
   touchInputMode,
   stylusConfig,
@@ -443,6 +449,10 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
     [onCircleEraseSweep, page.id]
   );
 
+  const hasExplicitDimensions = typeof regularWidthPx === 'number' && regularWidthPx > 0;
+  const innerWidthPx = hasExplicitDimensions ? regularWidthPx : 0;
+  const innerHeightPx = hasExplicitDimensions ? regularWidthPx / pageAspect : 0;
+
   return (
     <div
       id={isActivePage ? 'document-sheet' : undefined}
@@ -453,19 +463,42 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
           onActivatePage(page.id);
         }
       }}
-      style={{
-        aspectRatio: `${pageAspect}`,
-        maxWidth: `calc((100vh - 110px) * ${pageAspect})`,
-        width: '100%',
-        height: 'auto',
-        contain: 'layout style',
-      }}
-      className={`shrink-0 bg-white dark:bg-slate-900 shadow-2xl rounded-xl border relative overflow-hidden ${
+      style={
+        hasExplicitDimensions
+          ? {
+              width: `${innerWidthPx * povScale}px`,
+              height: `${innerHeightPx * povScale}px`,
+              contain: 'layout style',
+            }
+          : {
+              aspectRatio: `${pageAspect}`,
+              maxWidth: `calc((100vh - 110px) * ${pageAspect})`,
+              width: '100%',
+              height: 'auto',
+              contain: 'layout style',
+            }
+      }
+      className={`shrink-0 bg-white dark:bg-slate-900 shadow-2xl border relative overflow-hidden ${
+        isFullPovMode ? 'rounded-none border-x-0' : 'rounded-xl'
+      } ${
         isActivePage
           ? 'border-slate-300 dark:border-slate-700 ring-1 ring-blue-500/20'
           : 'border-slate-300 dark:border-slate-800'
       }`}
     >
+      <div
+        style={
+          hasExplicitDimensions
+            ? {
+                width: `${innerWidthPx}px`,
+                height: `${innerHeightPx}px`,
+                transform: povScale !== 1 ? `scale(${povScale})` : undefined,
+                transformOrigin: 'top left',
+              }
+            : undefined
+        }
+        className={hasExplicitDimensions ? 'relative overflow-hidden' : 'relative w-full h-full'}
+      >
       {/* Persistent Low-Res Blurry Visual Placeholder (reserves exact page space when off-screen & during entry fade) */}
       {(!shouldMountStage || !stageReady) && (
         <div
@@ -510,6 +543,8 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
             onPresenterStateChange={onPresenterStateChange}
             pageId={page.id}
             template={page.template || 'grid'}
+            underlayTemplate={page.underlayTemplate || 'blank'}
+            povScale={povScale}
             pdfSourceId={page.pdfSourceId}
             pdfPageNumber={page.pdfPageNumber}
             previewDataUrl={page.previewDataUrl}
@@ -586,6 +621,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
           />
         </div>
       )}
+      </div>
     </div>
   );
 };
@@ -604,6 +640,9 @@ export const VirtualizedPageSlot = React.memo(
       return (
         prev.page === next.page &&
         prev.pageIndex === next.pageIndex &&
+        prev.regularWidthPx === next.regularWidthPx &&
+        prev.povScale === next.povScale &&
+        prev.isFullPovMode === next.isFullPovMode &&
         prev.strokes === next.strokes &&
         prev.shapes === next.shapes &&
         prev.graphs === next.graphs &&

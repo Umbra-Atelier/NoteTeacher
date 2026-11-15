@@ -21,6 +21,7 @@ interface DesmosGraphBoxProps {
   isActive: boolean;
   isMagicGrabActive: boolean;
   zoomScale?: number;
+  allowFingerControls?: boolean;
   isReadOnly?: boolean;
   hideChrome?: boolean;
   onSelect: () => void;
@@ -67,6 +68,7 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
   box,
   isActive,
   zoomScale = 1,
+  allowFingerControls = true,
   isReadOnly = false,
   hideChrome = false,
   onSelect,
@@ -74,6 +76,7 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
   onDelete,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const lastPointerTypeRef = useRef<string>('mouse');
   const logicalStageRef = useRef<HTMLDivElement>(null);
   const prefsBtnRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -95,7 +98,10 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [isRepositioningActive, setIsRepositioningActive] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0, boxX: 0, boxY: 0 });
-  const [desmosLoaded, setDesmosLoaded] = useState(false);
+  const [desmosLoaded, setDesmosLoaded] = useState(
+    () => typeof window !== 'undefined' && Boolean(window.Desmos?.GraphingCalculator)
+  );
+  const [showEmbedFallback, setShowEmbedFallback] = useState(false);
   const [isKeypadOpen, setIsKeypadOpen] = useState(false);
 
   // Freeze logical internal Desmos dimensions so resizing the box with L-grabs ONLY scales CSS
@@ -387,16 +393,24 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       }
     };
 
+    let fallbackTimer: number | null = null;
     if (!initCalculator()) {
       checkInterval = setInterval(() => {
-        if (initCalculator() && checkInterval) {
-          clearInterval(checkInterval);
+        if (initCalculator()) {
+          if (checkInterval) clearInterval(checkInterval);
+          if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
         }
       }, 200);
+      fallbackTimer = window.setTimeout(() => {
+        if (!calcInstanceRef.current) {
+          setShowEmbedFallback(true);
+        }
+      }, 2500);
     }
 
     return () => {
       if (checkInterval) clearInterval(checkInterval);
+      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
       if (syncTimer) window.clearTimeout(syncTimer);
       if (observer) observer.disconnect();
       if (calcInstanceRef.current) {
@@ -470,22 +484,13 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
   }, [isReadOnly, box.desmosState, box.expressions, box.isFormulaOpen]);
 
   // Top-Left Move Handle Drag (smooth lag-free rAF)
-  const handleMouseDownTopLeft = (e: React.MouseEvent) => {
+  const handlePointerDownTopLeft = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
     e.preventDefault();
     e.stopPropagation();
     setDragStart({ x: e.clientX, y: e.clientY, boxX: box.x, boxY: box.y });
     setIsRepositioningActive(true);
     setIsDragging(true);
-  };
-
-  const handleTouchStartTopLeft = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      const t = e.touches[0];
-      setDragStart({ x: t.clientX, y: t.clientY, boxX: box.x, boxY: box.y });
-      setIsRepositioningActive(true);
-      setIsDragging(true);
-    }
   };
 
   useEffect(() => {
@@ -514,12 +519,9 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       }
     };
 
-    const handleMouseMove = (e: MouseEvent) => scheduleMove(e.clientX, e.clientY);
-    const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        e.preventDefault();
-        scheduleMove(e.touches[0].clientX, e.touches[0].clientY);
-      }
+    const handlePointerMove = (e: PointerEvent) => {
+      e.preventDefault();
+      scheduleMove(e.clientX, e.clientY);
     };
     const handleEnd = () => {
       if (rafId) cancelAnimationFrame(rafId);
@@ -527,16 +529,14 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       setIsRepositioningActive(false);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleEnd);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleEnd);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleEnd);
+    window.addEventListener('pointercancel', handleEnd);
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleEnd);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handleEnd);
+      window.removeEventListener('pointercancel', handleEnd);
     };
   }, [isDragging, dragStart, onUpdate, zoomScale]);
 
@@ -575,25 +575,20 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       }
     };
 
-    const onMouseMove = (ev: MouseEvent) => scheduleResize(ev.clientX, ev.clientY);
-    const onTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) {
-        ev.preventDefault();
-        scheduleResize(ev.touches[0].clientX, ev.touches[0].clientY);
-      }
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      scheduleResize(ev.clientX, ev.clientY);
     };
     const onEnd = () => {
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onEnd);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onEnd);
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
   };
 
   // Proportional L-Grab Resizing via Bottom-Left corner
@@ -630,25 +625,20 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       }
     };
 
-    const onMouseMove = (ev: MouseEvent) => scheduleResize(ev.clientX, ev.clientY);
-    const onTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) {
-        ev.preventDefault();
-        scheduleResize(ev.touches[0].clientX, ev.touches[0].clientY);
-      }
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      scheduleResize(ev.clientX, ev.clientY);
     };
     const onEnd = () => {
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onEnd);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onEnd);
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
   };
 
   return (
@@ -656,7 +646,11 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       ref={containerRef}
       data-desmos-box-id={box.id}
       data-active={isActive ? 'true' : 'false'}
+      onPointerDownCapture={(e) => {
+        lastPointerTypeRef.current = e.pointerType;
+      }}
       onClick={() => {
+        if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
         if (!isActive) {
           onSelect();
         }
@@ -685,21 +679,16 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       {!hideChrome && (
         <div
           data-export-hide-clean="true"
-          onMouseDown={(e) => {
+          onPointerDown={(e) => {
+            if (e.pointerType === 'touch' && !allowFingerControls) return;
             e.preventDefault();
             e.stopPropagation();
+            if (!isActive) onSelect();
             startResizeTR(e.clientX, e.clientY);
           }}
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            if (e.touches.length === 1) {
-              startResizeTR(e.touches[0].clientX, e.touches[0].clientY);
-            }
-          }}
-          onPointerDown={(e) => e.stopPropagation()}
           title="Drag L-handle to scale Desmos graph box without changing graph bounds"
           style={{ touchAction: 'none' }}
-          className="absolute -top-3.5 -right-3.5 w-8 h-8 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto"
+          className="absolute -top-3.5 -right-3.5 w-8 h-8 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto touch-none"
         >
           <div className="w-5 h-5 border-t-3 border-r-3 border-blue-500 rounded-tr-md bg-white dark:bg-slate-900 shadow-lg flex items-center justify-center">
             <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />
@@ -713,21 +702,16 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       {!hideChrome && (
         <div
           data-export-hide-clean="true"
-          onMouseDown={(e) => {
+          onPointerDown={(e) => {
+            if (e.pointerType === 'touch' && !allowFingerControls) return;
             e.preventDefault();
             e.stopPropagation();
+            if (!isActive) onSelect();
             startResizeBL(e.clientX, e.clientY);
           }}
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            if (e.touches.length === 1) {
-              startResizeBL(e.touches[0].clientX, e.touches[0].clientY);
-            }
-          }}
-          onPointerDown={(e) => e.stopPropagation()}
           title="Drag L-handle to scale Desmos graph box without changing graph bounds"
           style={{ touchAction: 'none' }}
-          className="absolute -bottom-3.5 -left-3.5 w-8 h-8 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto"
+          className="absolute -bottom-3.5 -left-3.5 w-8 h-8 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto touch-none"
         >
           <div className="w-5 h-5 border-b-3 border-l-3 border-blue-500 rounded-bl-md bg-white dark:bg-slate-900 shadow-lg flex items-center justify-center">
             <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />
@@ -766,12 +750,10 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
             {!hideChrome && (
               <div
                 data-export-hide-clean="true"
-                onMouseDown={handleMouseDownTopLeft}
-                onTouchStart={handleTouchStartTopLeft}
-                onPointerDown={(e) => e.stopPropagation()}
+                onPointerDown={handlePointerDownTopLeft}
                 style={{ touchAction: 'none' }}
                 title="Drag to reposition Desmos graph"
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold cursor-grab active:cursor-grabbing select-none shadow-xs ${
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold cursor-grab active:cursor-grabbing select-none shadow-xs touch-none ${
                   isRepositioningActive
                     ? 'bg-indigo-600 text-white ring-2 ring-indigo-400 shadow-md'
                     : 'bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 hover:bg-blue-200'
@@ -876,10 +858,12 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
             className="w-full h-full rounded-b-xl overflow-visible desmos-calc-container"
           />
 
-          {!desmosLoaded && (
+          {!desmosLoaded && showEmbedFallback && (
             <iframe
               src="https://www.desmos.com/calculator?embed"
               title="Desmos Graphing Calculator"
+              allow="fullscreen"
+              allowFullScreen
               className="w-full h-full border-0 rounded-b-xl"
             />
           )}

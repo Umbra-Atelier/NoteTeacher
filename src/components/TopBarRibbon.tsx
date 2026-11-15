@@ -183,6 +183,7 @@ interface TopBarRibbonProps {
   presenterMode: PresenterMode;
   onSetPresenterMode: (m: PresenterMode) => void;
   currentTemplate: PaperTemplate;
+  currentUnderlayTemplate?: PaperTemplate;
   onSetTemplate: (t: PaperTemplate) => void;
   onUploadPdf: (file: File) => void;
 
@@ -296,6 +297,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   presenterMode,
   onSetPresenterMode,
   currentTemplate,
+  currentUnderlayTemplate,
   onSetTemplate,
   onUploadPdf,
   isGeometricEraserActive = false,
@@ -339,7 +341,8 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     };
   }, []);
 
-  const handleToggleFullscreen = async () => {
+  const handleToggleFullscreen = async (e?: React.MouseEvent<HTMLButtonElement>) => {
+    e?.currentTarget?.blur();
     if (typeof document === 'undefined') return;
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null;
@@ -358,7 +361,11 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         }
       } else {
         if (typeof el.requestFullscreen === 'function') {
-          await el.requestFullscreen();
+          try {
+            await el.requestFullscreen({ navigationUI: 'hide' });
+          } catch {
+            await el.requestFullscreen();
+          }
         } else if (typeof el.webkitRequestFullscreen === 'function') {
           await el.webkitRequestFullscreen();
         } else {
@@ -1061,7 +1068,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   );
 
   return (
-    <header className="sticky top-0 z-[100] w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-xs select-none">
+    <header className="sticky top-0 z-[100] w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-xs select-none overscroll-none touch-pan-x">
       {/* ROW 1: TOP BAR (File Button + Modes + Global Actions; Mode Bar wraps to 2nd line on narrow screens) */}
       <div
         ref={row1Ref}
@@ -1332,11 +1339,21 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 ref={templateMenuBtnRef}
                 type="button"
                 onClick={() => setShowTemplateMenu(!showTemplateMenu)}
-                title="Change Canvas Background Paper"
+                title={
+                  currentTemplate === 'pdf'
+                    ? 'Change Paper Pattern Underneath PDF'
+                    : 'Change Canvas Background Paper'
+                }
                 className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 whitespace-nowrap shrink-0"
               >
                 <Grid className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-                <span className="capitalize">{currentTemplate} Paper</span>
+                <span className="capitalize">
+                  {currentTemplate === 'pdf'
+                    ? currentUnderlayTemplate && currentUnderlayTemplate !== 'blank'
+                      ? `PDF · ${currentUnderlayTemplate}`
+                      : 'PDF Background'
+                    : `${currentTemplate} Paper`}
+                </span>
               </button>
 
               {showTemplateMenu && (
@@ -1350,29 +1367,43 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 >
                   <div
                     onClick={(e) => e.stopPropagation()}
-                    className="w-40 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1 text-xs"
+                    className="w-48 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1 text-xs"
                   >
+                    {currentTemplate === 'pdf' && (
+                      <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400 border-b border-slate-100 dark:border-slate-700 mb-0.5">
+                        Pattern Underneath PDF
+                      </div>
+                    )}
                     {[
                       { id: 'blank', label: 'Blank Whiteboard' },
                       { id: 'lined', label: 'Lined Notebook' },
                       { id: 'grid', label: 'Graph Paper' },
                       { id: 'dotted', label: 'Dotted Grid' },
-                    ].map((t) => (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => {
-                          onSetTemplate(t.id as PaperTemplate);
-                          setShowTemplateMenu(false);
-                        }}
-                        className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-slate-100 dark:hover:bg-slate-700 ${
-                          currentTemplate === t.id ? 'font-bold text-blue-600' : 'text-slate-700 dark:text-slate-200'
-                        }`}
-                      >
-                        <span>{t.label}</span>
-                        {currentTemplate === t.id && <Check className="w-3.5 h-3.5" />}
-                      </button>
-                    ))}
+                    ].map((t) => {
+                      const activePattern =
+                        currentTemplate === 'pdf'
+                          ? currentUnderlayTemplate || 'blank'
+                          : currentTemplate;
+                      const isActivePattern = activePattern === t.id;
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => {
+                            onSetTemplate(t.id as PaperTemplate);
+                            setShowTemplateMenu(false);
+                          }}
+                          className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-slate-100 dark:hover:bg-slate-700 ${
+                            isActivePattern
+                              ? 'font-bold text-blue-600 dark:text-blue-400'
+                              : 'text-slate-700 dark:text-slate-200'
+                          }`}
+                        >
+                          <span>{t.label}</span>
+                          {isActivePattern && <Check className="w-3.5 h-3.5" />}
+                        </button>
+                      );
+                    })}
                   </div>
                 </AnchoredScreenPopup>
               )}
@@ -1409,7 +1440,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
             {/* Top-Right Fullscreen Toggle */}
             <button
               type="button"
-              onClick={() => void handleToggleFullscreen()}
+              onClick={(e) => void handleToggleFullscreen(e)}
               title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
               aria-label={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
               data-testid="fullscreen-toggle-btn"

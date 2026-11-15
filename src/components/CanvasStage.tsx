@@ -59,6 +59,8 @@ interface CanvasStageProps {
   pageId: string;
   isActivePage?: boolean;
   template: PaperTemplate;
+  underlayTemplate?: PaperTemplate;
+  povScale?: number;
   pdfSourceId?: string;
   pdfPageNumber?: number;
   previewDataUrl?: string;
@@ -299,6 +301,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   onPresenterStateChange,
   pageId,
   template,
+  underlayTemplate = 'blank',
+  povScale = 1,
   pdfSourceId,
   pdfPageNumber,
   previewDataUrl,
@@ -381,9 +385,25 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // Zoom & Pan state (Two-finger pinch-to-zoom centered on finger midpoint)
   const [zoomScale, setZoomScale] = useState<number>(1);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const zoomControlRef = useRef<HTMLDivElement>(null);
+  const [isZoomControlActive, setIsZoomControlActive] = useState<boolean>(false);
 
   const activeZoomScale = externalZoomScale ?? zoomScale;
   const activePanOffset = externalPanOffset ?? panOffset;
+
+  // Return bottom-right zoom controls to transparent when clicking outside
+  useEffect(() => {
+    if (!isZoomControlActive) return;
+    const handleOutsidePointerDown = (e: PointerEvent) => {
+      if (zoomControlRef.current && !zoomControlRef.current.contains(e.target as Node)) {
+        setIsZoomControlActive(false);
+      }
+    };
+    window.addEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
+    };
+  }, [isZoomControlActive]);
 
   const onViewportChangeRef = useRef(onViewportChange);
   onViewportChangeRef.current = onViewportChange;
@@ -827,6 +847,27 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     setAngleCenter(null);
   }, [mode, pageId]);
 
+  const commitActiveDrawingStrokeRef = useRef<() => void>(() => {});
+  commitActiveDrawingStrokeRef.current = () => {
+    if (!isDrawingRef.current) return;
+    const pts = [...currentPointsRef.current];
+    isDrawingRef.current = false;
+    currentPointsRef.current = [];
+    setIsDrawing(false);
+    setCurrentPoints([]);
+    if (pts.length >= 1) {
+      onAddStroke({
+        id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        pageId,
+        tool: penType,
+        color: currentColor,
+        width: strokeWidth,
+        opacity: penType === 'highlighter' ? 0.35 : 1,
+        points: pts,
+      });
+    }
+  };
+
   // Safety reset if a pointer lifts or cancels outside the canvas layer
   useEffect(() => {
     const resetStuckPointer = (ev: PointerEvent) => {
@@ -834,8 +875,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         activeSmartStylusPointerIdRef.current = null;
         isStylusDownRef.current = false;
       }
-      if (activePointerIdRef.current === ev.pointerId && ev.pointerType === 'pen') {
-        isStylusDownRef.current = false;
+      if (activePointerIdRef.current === ev.pointerId) {
+        if (ev.pointerType === 'pen') {
+          isStylusDownRef.current = false;
+        }
+        if (isDrawingRef.current) {
+          commitActiveDrawingStrokeRef.current();
+        }
+        activePointerIdRef.current = null;
       }
     };
     window.addEventListener('pointerup', resetStuckPointer, { passive: true });
@@ -1129,6 +1176,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
+      // Never let resting palm/wrist two-touch detection abort an active pen stroke
+      if (isStylusDownRef.current || isDrawingRef.current) {
+        return;
+      }
+
       const fingerTouches = getActiveFingerTouches(e.touches);
       if (fingerTouches.length >= 2) {
         e.preventDefault();
@@ -1160,8 +1212,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         };
 
         const rect = container.getBoundingClientRect();
-        const focalStageX = (mid.x - rect.left - panOffset.x) / zoomScale;
-        const focalStageY = (mid.y - rect.top - panOffset.y) / zoomScale;
+        const outerScale = rect.width / (container.clientWidth || rect.width || 1);
+        const localMidX = (mid.x - rect.left) / outerScale;
+        const localMidY = (mid.y - rect.top) / outerScale;
+        const focalStageX = (localMidX - panOffset.x) / zoomScale;
+        const focalStageY = (localMidY - panOffset.y) / zoomScale;
 
         pinchInitialDistRef.current = dist;
         pinchInitialScaleRef.current = zoomScale;
@@ -1175,6 +1230,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
 
       if (touchInputMode === 'stylus_only' || touchInputMode === 'stylus_and_hand') {
+        return;
+      }
+
+      if (isStylusDownRef.current || isDrawingRef.current) {
+        isPinchingRef.current = false;
+        pinchInitialDistRef.current = null;
+        pinchFocalStageRef.current = null;
+        return;
+      }
+
+      if (e.touches.length < 2) {
+        isPinchingRef.current = false;
+        pinchInitialDistRef.current = null;
+        pinchFocalStageRef.current = null;
         return;
       }
 
@@ -1198,8 +1267,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         const newScale = Math.max(0.6, Math.min(3.5, pinchInitialScaleRef.current * factor));
 
         const rect = container.getBoundingClientRect();
-        const newPanX = currentMid.x - rect.left - pinchFocalStageRef.current.x * newScale;
-        const newPanY = currentMid.y - rect.top - pinchFocalStageRef.current.y * newScale;
+        const outerScale = rect.width / (container.clientWidth || rect.width || 1);
+        const localMidX = (currentMid.x - rect.left) / outerScale;
+        const localMidY = (currentMid.y - rect.top) / outerScale;
+        const newPanX = localMidX - pinchFocalStageRef.current.x * newScale;
+        const newPanY = localMidY - pinchFocalStageRef.current.y * newScale;
 
         setZoomScale(newScale);
         setPanOffset({
@@ -1222,8 +1294,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const rect = container.getBoundingClientRect();
-        const cursorX = e.clientX - rect.left;
-        const cursorY = e.clientY - rect.top;
+        const outerScale = rect.width / (container.clientWidth || rect.width || 1);
+        const cursorX = (e.clientX - rect.left) / outerScale;
+        const cursorY = (e.clientY - rect.top) / outerScale;
 
         const stageX = (cursorX - panOffset.x) / zoomScale;
         const stageY = (cursorY - panOffset.y) / zoomScale;
@@ -1323,8 +1396,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, screenW, screenH);
 
+      const effectivePattern = template === 'pdf' ? underlayTemplate : template;
+
       // Grid / graph pattern if paper is grid or graph
-      if (template === 'grid' || template === 'graph') {
+      if (effectivePattern === 'grid' || effectivePattern === 'graph') {
         ctx.strokeStyle = '#E2E8F0';
         ctx.lineWidth = 1;
         const gridSize = 24 * activeZoomScale;
@@ -1342,6 +1417,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           ctx.lineTo(screenW, gy);
           ctx.stroke();
         }
+      } else if (effectivePattern === 'lined') {
+        ctx.strokeStyle = 'rgba(147, 197, 253, 0.45)';
+        ctx.lineWidth = 1;
+        const lineSpacing = 32 * activeZoomScale;
+        const startY = (-(stageCropTop * activeZoomScale) % lineSpacing + lineSpacing) % lineSpacing;
+        for (let gy = startY; gy < screenH; gy += lineSpacing) {
+          ctx.beginPath();
+          ctx.moveTo(0, gy);
+          ctx.lineTo(screenW, gy);
+          ctx.stroke();
+        }
+      } else if (effectivePattern === 'dotted') {
+        ctx.fillStyle = 'rgba(100, 116, 139, 0.35)';
+        const spacing = 24 * activeZoomScale;
+        const startX = (-(stageCropLeft * activeZoomScale) % spacing + spacing) % spacing;
+        const startY = (-(stageCropTop * activeZoomScale) % spacing + spacing) % spacing;
+        for (let gx = startX; gx < screenW; gx += spacing) {
+          for (let gy = startY; gy < screenH; gy += spacing) {
+            ctx.beginPath();
+            ctx.arc(gx, gy, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
       }
 
       // 2. Draw PDF background image if present (resolving lazy PDF source when needed)
@@ -1358,7 +1456,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               const pdfDrawY = -stageCropTop * activeZoomScale;
               const pdfDrawW = pdfW * activeZoomScale;
               const pdfDrawH = pdfH * activeZoomScale;
+              ctx.save();
+              if (effectivePattern !== 'blank') {
+                ctx.globalCompositeOperation = 'multiply';
+              }
               ctx.drawImage(img, pdfDrawX, pdfDrawY, pdfDrawW, pdfDrawH);
+              ctx.restore();
               resolve();
             };
             img.onerror = () => resolve();
@@ -1518,26 +1621,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     phase: 'down' | 'move' | 'up'
   ): boolean => {
     if (isAudienceViewer) return false;
-    if (touchInputMode === 'two_finger') return true;
     if (e.pointerType === 'pen') return true;
     if (e.pointerType === 'mouse') return stylusConfig?.allowMouseInput ?? true;
     if (e.pointerType === 'touch') {
-      if (stylusConfig?.detectionMode === 'smart_tip') {
-        if (phase !== 'down' && activeSmartStylusPointerIdRef.current === e.pointerId) {
-          return true;
+      // In Active Pen mode, ONLY the pen (or optional mouse) may draw, erase, or create elements.
+      // Capacitive touches are handled by mode-specific gestures (2-finger pinch/pan) & element controls.
+      if (stylusConfig?.detectionMode !== 'smart_tip') {
+        return false;
+      }
+      if (touchInputMode === 'two_finger') return true;
+      if (phase !== 'down' && activeSmartStylusPointerIdRef.current === e.pointerId) {
+        return true;
+      }
+      if (phase === 'down' || (phase === 'move' && !isDrawingRef.current && (e.buttons & 1) !== 0)) {
+        const contactSize = Math.max(e.width || 0, e.height || 0);
+        const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
+        const maxTip = stylusConfig.maxTipSizePx ?? 14;
+        const accepted =
+          contactSize <= maxTip || (hasPenPressure && contactSize <= maxTip + 6);
+        if (accepted) {
+          activeSmartStylusPointerIdRef.current = e.pointerId;
+          isStylusDownRef.current = true;
         }
-        if (phase === 'down') {
-          const contactSize = Math.max(e.width || 0, e.height || 0);
-          const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
-          const maxTip = stylusConfig.maxTipSizePx ?? 14;
-          const accepted =
-            contactSize <= maxTip || (hasPenPressure && contactSize <= maxTip + 6);
-          if (accepted) {
-            activeSmartStylusPointerIdRef.current = e.pointerId;
-            isStylusDownRef.current = true;
-          }
-          return accepted;
-        }
+        return accepted;
       }
       return false;
     }
@@ -1546,9 +1652,6 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   // Pointer Down
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!isActivePage && onActivatePage) {
-      onActivatePage();
-    }
     if (e.pointerType === 'pen') {
       isStylusDownRef.current = true;
       // An explicit hardware stylus contact must never be blocked by a stale pinch flag
@@ -1556,6 +1659,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
 
     if (!isPointerAccepted(e, 'down')) {
+      return;
+    }
+
+    if (!isActivePage && onActivatePage) {
+      onActivatePage();
+    }
+
+    // Never allow a non-pen touch/mouse to hijack an active stylus gesture
+    if (
+      e.pointerType !== 'pen' &&
+      activePointerIdRef.current !== null &&
+      activePointerIdRef.current !== e.pointerId &&
+      (isStylusDownRef.current || isDrawingRef.current)
+    ) {
       return;
     }
 
@@ -1781,7 +1898,34 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+    const isPenContacting =
+      e.pointerType === 'pen' && ((e.buttons & 1) !== 0 || e.pressure > 0.001);
+    const isPenHovering =
+      e.pointerType === 'pen' && (e.buttons & 1) === 0 && e.pressure <= 0.001;
+
+    // If hardware pen lifted into hover and browser missed pointerup, cleanly commit the open stroke
+    if (isPenHovering) {
+      if (activePointerIdRef.current === e.pointerId) {
+        if (isDrawingRef.current) {
+          commitActiveDrawingStrokeRef.current();
+        }
+        activePointerIdRef.current = null;
+        isStylusDownRef.current = false;
+      }
+      return;
+    }
+
+    if (isPenContacting) {
+      isStylusDownRef.current = true;
+      isPinchingRef.current = false;
+      // Allow a currently drawing pen to pre-empt any stale pointerId (e.g., missed pointerup between words)
+      if (activePointerIdRef.current !== null && activePointerIdRef.current !== e.pointerId) {
+        if (isDrawingRef.current && currentPointsRef.current.length > 0) {
+          commitActiveDrawingStrokeRef.current();
+        }
+        activePointerIdRef.current = e.pointerId;
+      }
+    } else if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
       return;
     }
 
@@ -1812,8 +1956,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         const container = containerRef.current;
         if (container) {
           const rect = container.getBoundingClientRect();
-          const focalClientX = stylusZoomAnchor.clientX - rect.left;
-          const focalClientY = stylusZoomAnchor.clientY - rect.top;
+          const outerScale = rect.width / (container.clientWidth || rect.width || 1);
+          const focalClientX = (stylusZoomAnchor.clientX - rect.left) / outerScale;
+          const focalClientY = (stylusZoomAnchor.clientY - rect.top) / outerScale;
           setPanOffset({
             x: focalClientX - stylusZoomAnchor.stageX * newScale,
             y: focalClientY - stylusZoomAnchor.stageY * newScale,
@@ -1823,8 +1968,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
       if (leftToolbarTool === 'pan' && stylusPanStart && isCapturedOrPressed) {
-        const dx = e.clientX - stylusPanStart.clientX;
-        const dy = e.clientY - stylusPanStart.clientY;
+        const container = containerRef.current;
+        const rect = container?.getBoundingClientRect();
+        const outerScale =
+          container && rect ? rect.width / (container.clientWidth || rect.width || 1) : 1;
+        const dx = (e.clientX - stylusPanStart.clientX) / outerScale;
+        const dy = (e.clientY - stylusPanStart.clientY) / outerScale;
         setPanOffset({
           x: stylusPanStart.initialPanX + dx,
           y: stylusPanStart.initialPanY + dy,
@@ -1870,6 +2019,55 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
 
     if (mode === 'drawing') {
+      // Mid-stroke pen recovery: if pointerdown was dropped/delayed/canceled (e.g. by wrist/palm rejection),
+      // immediately begin drawing as soon as the contacting pen moves so swiping never fails to write.
+      if (!isDrawingRef.current) {
+        const isSmartTipContacting =
+          stylusConfig?.detectionMode === 'smart_tip' &&
+          e.pointerType === 'touch' &&
+          activeSmartStylusPointerIdRef.current === e.pointerId &&
+          (e.buttons & 1) !== 0;
+
+        if (isPenContacting || isSmartTipContacting) {
+          if (!isActivePage && onActivatePage) {
+            onActivatePage();
+          }
+          setSelectedGridShapeId(null);
+          setSelectedGraphId(null);
+          setSelectedCalcId(null);
+          setSelectedImageId(null);
+          if (editingDictateBoxId) {
+            onStopManualEditDictateBox?.();
+          }
+          onClickOutsideDictateBox?.();
+
+          activePointerIdRef.current = e.pointerId;
+          trySetPointerCapture(e.currentTarget, e.pointerId);
+
+          const nativeEv = e.nativeEvent as PointerEvent & {
+            getCoalescedEvents?: () => PointerEvent[];
+          };
+          const coalesced =
+            typeof nativeEv.getCoalescedEvents === 'function'
+              ? nativeEv.getCoalescedEvents()
+              : null;
+          const initialPts: StrokePoint[] =
+            coalesced && coalesced.length > 0
+              ? coalesced.map((ce) => {
+                  const c = getStageCoords(ce.clientX, ce.clientY);
+                  return { x: c.x, y: c.y, pressure: ce.pressure || pressure };
+                })
+              : [{ x, y, pressure }];
+
+          isDrawingRef.current = true;
+          currentPointsRef.current = initialPts;
+          setIsDrawing(true);
+          setCurrentPoints(initialPts);
+          onColorUsed(currentColor);
+          return;
+        }
+      }
+
       if (isDrawingRef.current) {
         const nativeEv = e.nativeEvent as PointerEvent & {
           getCoalescedEvents?: () => PointerEvent[];
@@ -2648,13 +2846,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   };
 
-  // Pointer Cancel (reset stylus / gesture states cleanly on palm rejection or system interruption)
+  // Pointer Cancel (reset stylus / gesture states cleanly without letting rejected palm touches cancel active pen ink)
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'pen' || activeSmartStylusPointerIdRef.current === e.pointerId) {
+    const isTrackedPenOrSmart =
+      e.pointerType === 'pen' || activeSmartStylusPointerIdRef.current === e.pointerId;
+    if (isTrackedPenOrSmart) {
       isStylusDownRef.current = false;
       activeSmartStylusPointerIdRef.current = null;
     }
-    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+    if (e.pointerId !== activePointerIdRef.current) {
       return;
     }
     activePointerIdRef.current = null;
@@ -2671,12 +2871,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       );
       hasGhostedInCurrentGestureRef.current = false;
     }
-    isDrawingRef.current = false;
-    currentPointsRef.current = [];
+    // Preserve any real pen points already drawn before an OS interruption
+    if (mode === 'drawing' && isDrawingRef.current && currentPointsRef.current.length >= 2) {
+      commitActiveDrawingStrokeRef.current();
+    } else {
+      isDrawingRef.current = false;
+      currentPointsRef.current = [];
+      setIsDrawing(false);
+      setCurrentPoints([]);
+    }
     setStylusZoomAnchor(null);
     setStylusPanStart(null);
-    setIsDrawing(false);
-    setCurrentPoints([]);
     setShapeDragStart(null);
     setShapeDragCurrent(null);
     setGraphDragStart(null);
@@ -2699,27 +2904,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       isStylusDownRef.current = false;
       activeSmartStylusPointerIdRef.current = null;
     }
-    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+    if (e.pointerId !== activePointerIdRef.current) {
       return;
     }
     activePointerIdRef.current = null;
     if (mode === 'drawing' && isDrawingRef.current) {
-      const pts = [...currentPointsRef.current];
-      isDrawingRef.current = false;
-      currentPointsRef.current = [];
-      setIsDrawing(false);
-      setCurrentPoints([]);
-      if (pts.length >= 1) {
-        onAddStroke({
-          id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          pageId,
-          tool: penType,
-          color: currentColor,
-          width: strokeWidth,
-          opacity: penType === 'highlighter' ? 0.35 : 1,
-          points: pts,
-        });
-      }
+      commitActiveDrawingStrokeRef.current();
     }
   };
 
@@ -2794,34 +2984,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       clearInterval(interval);
       setCompassHoldProgress(0);
       setIsCompassRepositioning(false);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onEnd);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
       if (onTransformEnd) onTransformEnd();
     };
 
-    const onMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const onTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) onMove(ev.touches[0].clientX, ev.touches[0].clientY);
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      onMove(ev.clientX, ev.clientY);
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onEnd);
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
   };
 
-  const handleCompassMouseDown = (e: React.MouseEvent) => {
+  const allowFingerElementControls = touchInputMode !== 'stylus_only';
+
+  const handleCompassPointerDown = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerElementControls) return;
+    e.preventDefault();
     e.stopPropagation();
     startCompassMove(e.clientX, e.clientY);
-  };
-
-  const handleCompassTouchStart = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      startCompassMove(e.touches[0].clientX, e.touches[0].clientY);
-    }
   };
 
   // Complete Geometric Angle Tool: Decompose into 3 independent elements
@@ -3164,7 +3349,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`relative w-full h-full bg-white dark:bg-slate-900 overflow-hidden select-none ${
+      className={`relative w-full h-full bg-white dark:bg-slate-900 overflow-hidden select-none overscroll-none ${
+        touchInputMode === 'stylus_only' || touchInputMode === 'stylus_and_hand' ? 'touch-none' : ''
+      } ${
         isAudienceViewer ? 'pointer-events-none' : ''
       }`}
     >
@@ -3221,117 +3408,129 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         className="canvas-zoom-wrapper relative w-full h-full"
       >
         {/* 1. BACKGROUND PAPER / PDF LAYER */}
-        <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden flex items-center justify-center bg-white">
-          {template === 'pdf' && (() => {
-            const blurryBaseSrc =
-              previewDataUrl ||
-              (pdfDataUrl && pdfDataUrl !== '__CACHED__' ? pdfDataUrl : undefined);
-            const crispViewerSrc =
-              pdfDataUrl && pdfDataUrl !== '__CACHED__' ? pdfDataUrl : undefined;
-
-            return (
-              <div
-                className="relative w-full h-full overflow-hidden bg-white select-none pointer-events-none"
-                style={{ aspectRatio: aspectRatio ? `${aspectRatio}` : undefined }}
-              >
-                {blurryBaseSrc && (
-                  <img
-                    src={blurryBaseSrc}
-                    alt=""
-                    aria-hidden="true"
-                    className="absolute inset-0 w-full h-full object-fill select-none pointer-events-none"
-                    style={{ filter: 'blur(5px)', transform: 'scale(1.02)' }}
+        {(() => {
+          const effectivePaperPattern: PaperTemplate =
+            template === 'pdf' ? underlayTemplate || 'blank' : template;
+          return (
+            <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden flex items-center justify-center bg-white">
+              {/* Lined Notebook Paper */}
+              {effectivePaperPattern === 'lined' && (
+                <div className="absolute inset-0 w-full h-full">
+                  <div className="absolute left-24 top-0 bottom-0 w-[1.5px] bg-rose-400 opacity-60 z-0" />
+                  <div
+                    className="w-full h-full"
+                    style={{
+                      backgroundImage:
+                        'linear-gradient(to bottom, transparent 31px, #93C5FD 32px)',
+                      backgroundSize: '100% 32px',
+                      opacity: 0.35,
+                    }}
                   />
-                )}
+                </div>
+              )}
 
-                {isAudienceViewer ? (
-                  crispViewerSrc && (
-                    <img
-                      src={crispViewerSrc}
-                      alt="PDF Page"
-                      className="relative w-full h-full object-contain select-none pointer-events-none"
-                    />
-                  )
-                ) : (
-                  Object.entries(loadedTiles).map(([tileKey, tileEntry]) => {
-                    const [cStr, rStr] = tileKey.split(',');
-                    const col = Number(cStr);
-                    const row = Number(rStr);
-                    return (
-                      <div
-                        key={tileKey}
-                        style={{
-                          left: `${(col / PDF_TILE_COLS) * 100}%`,
-                          top: `${(row / PDF_TILE_ROWS) * 100}%`,
-                          width: `${(1 / PDF_TILE_COLS) * 100}%`,
-                          height: `${(1 / PDF_TILE_ROWS) * 100}%`,
-                        }}
-                        className="absolute overflow-hidden pointer-events-none select-none"
-                      >
+              {/* Math Graph Paper */}
+              {(effectivePaperPattern === 'grid' || effectivePaperPattern === 'graph') && (
+                <div
+                  className="absolute inset-0 w-full h-full"
+                  style={{
+                    backgroundImage:
+                      'linear-gradient(to right, rgba(59, 130, 246, 0.15) 1px, transparent 1px), linear-gradient(to bottom, rgba(59, 130, 246, 0.15) 1px, transparent 1px)',
+                    backgroundSize: '24px 24px',
+                  }}
+                />
+              )}
+
+              {/* Dotted Paper */}
+              {effectivePaperPattern === 'dotted' && (
+                <div
+                  className="absolute inset-0 w-full h-full"
+                  style={{
+                    backgroundImage:
+                      'radial-gradient(rgba(100, 116, 139, 0.3) 1.5px, transparent 1.5px)',
+                    backgroundSize: '24px 24px',
+                  }}
+                />
+              )}
+
+              {/* PDF Document Layer rendered above paper underlay (multiplied when a pattern sits underneath) */}
+              {template === 'pdf' && (() => {
+                const blurryBaseSrc =
+                  previewDataUrl ||
+                  (pdfDataUrl && pdfDataUrl !== '__CACHED__' ? pdfDataUrl : undefined);
+                const crispViewerSrc =
+                  pdfDataUrl && pdfDataUrl !== '__CACHED__' ? pdfDataUrl : undefined;
+
+                return (
+                  <div
+                    className={`relative w-full h-full overflow-hidden select-none pointer-events-none ${
+                      effectivePaperPattern !== 'blank' ? 'bg-transparent' : 'bg-white'
+                    }`}
+                    style={{
+                      aspectRatio: aspectRatio ? `${aspectRatio}` : undefined,
+                      mixBlendMode: effectivePaperPattern !== 'blank' ? 'multiply' : 'normal',
+                    }}
+                  >
+                    {blurryBaseSrc && (
+                      <img
+                        src={blurryBaseSrc}
+                        alt=""
+                        aria-hidden="true"
+                        className="absolute inset-0 w-full h-full object-fill select-none pointer-events-none"
+                        style={{ filter: 'blur(5px)', transform: 'scale(1.02)' }}
+                      />
+                    )}
+
+                    {isAudienceViewer ? (
+                      crispViewerSrc && (
                         <img
-                          src={tileEntry.url}
-                          alt=""
-                          aria-hidden="true"
-                          decoding="async"
-                          onLoad={() => {
-                            setLoadedTiles((prev) =>
-                              prev[tileKey] && !prev[tileKey].ready
-                                ? { ...prev, [tileKey]: { ...prev[tileKey], ready: true } }
-                                : prev
-                            );
-                          }}
-                          className={`w-full h-full object-fill block select-none pointer-events-none transition-opacity duration-150 ${
-                            tileEntry.ready ? 'opacity-100' : 'opacity-0'
-                          }`}
+                          src={crispViewerSrc}
+                          alt="PDF Page"
+                          className="relative w-full h-full object-contain select-none pointer-events-none"
                         />
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            );
-          })()}
-
-          {/* Lined Notebook Paper */}
-          {template === 'lined' && (
-            <div className="w-full h-full relative">
-              <div className="absolute left-24 top-0 bottom-0 w-[1.5px] bg-rose-400 opacity-60 z-0" />
-              <div
-                className="w-full h-full"
-                style={{
-                  backgroundImage:
-                    'linear-gradient(to bottom, transparent 31px, #93C5FD 32px)',
-                  backgroundSize: '100% 32px',
-                  opacity: 0.35,
-                }}
-              />
+                      )
+                    ) : (
+                      Object.entries(loadedTiles).map(([tileKey, tileEntry]) => {
+                        const [cStr, rStr] = tileKey.split(',');
+                        const col = Number(cStr);
+                        const row = Number(rStr);
+                        return (
+                          <div
+                            key={tileKey}
+                            style={{
+                              left: `${(col / PDF_TILE_COLS) * 100}%`,
+                              top: `${(row / PDF_TILE_ROWS) * 100}%`,
+                              width: `${(1 / PDF_TILE_COLS) * 100}%`,
+                              height: `${(1 / PDF_TILE_ROWS) * 100}%`,
+                            }}
+                            className="absolute overflow-hidden pointer-events-none select-none"
+                          >
+                            <img
+                              src={tileEntry.url}
+                              alt=""
+                              aria-hidden="true"
+                              decoding="async"
+                              onLoad={() => {
+                                setLoadedTiles((prev) =>
+                                  prev[tileKey] && !prev[tileKey].ready
+                                    ? { ...prev, [tileKey]: { ...prev[tileKey], ready: true } }
+                                    : prev
+                                );
+                              }}
+                              className={`w-full h-full object-fill block select-none pointer-events-none transition-opacity duration-150 ${
+                                tileEntry.ready ? 'opacity-100' : 'opacity-0'
+                              }`}
+                            />
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                );
+              })()}
             </div>
-          )}
-
-          {/* Math Graph Paper */}
-          {(template === 'grid' || template === 'graph') && (
-            <div
-              className="w-full h-full"
-              style={{
-                backgroundImage:
-                  'linear-gradient(to right, rgba(59, 130, 246, 0.15) 1px, transparent 1px), linear-gradient(to bottom, rgba(59, 130, 246, 0.15) 1px, transparent 1px)',
-                backgroundSize: '24px 24px',
-              }}
-            />
-          )}
-
-          {/* Dotted Paper */}
-          {template === 'dotted' && (
-            <div
-              className="w-full h-full"
-              style={{
-                backgroundImage:
-                  'radial-gradient(rgba(100, 116, 139, 0.3) 1.5px, transparent 1.5px)',
-                backgroundSize: '24px 24px',
-              }}
-            />
-          )}
-        </div>
+          );
+        })()}
 
         {/* 2. VECTOR DRAWINGS & SHAPES LAYER (Rendered above graphs so annotations and shapes sit on top) */}
         <svg className="absolute inset-0 w-full h-full pointer-events-none z-35 overflow-hidden">
@@ -4136,7 +4335,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             key={img.id}
             image={img}
             isActive={!isAudienceViewer && selectedImageId === img.id}
-            zoomScale={activeZoomScale}
+            zoomScale={activeZoomScale * povScale}
+            allowFingerControls={allowFingerElementControls}
             isReadOnly={isAudienceViewer}
             hideChrome={isAudienceViewer && hideAudienceChrome}
             onSelect={() => {
@@ -4160,7 +4360,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               key={gridShape.id}
               shape={gridShape}
               isActive={!isAudienceViewer && selectedGridShapeId === gridShape.id}
-              zoomScale={activeZoomScale}
+              zoomScale={activeZoomScale * povScale}
+              allowFingerControls={allowFingerElementControls}
               isReadOnly={isAudienceViewer}
               hideChrome={isAudienceViewer && hideAudienceChrome}
               onSelect={() => {
@@ -4183,7 +4384,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             box={g}
             isActive={!isAudienceViewer && selectedGraphId === g.id}
             isMagicGrabActive={!isAudienceViewer && mode === 'edit' && isMagicGrabActive}
-            zoomScale={activeZoomScale}
+            zoomScale={activeZoomScale * povScale}
+            allowFingerControls={allowFingerElementControls}
             isReadOnly={isAudienceViewer}
             hideChrome={isAudienceViewer && hideAudienceChrome}
             onSelect={() => {
@@ -4205,7 +4407,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             key={c.id}
             box={c}
             isActive={!isAudienceViewer && selectedCalcId === c.id}
-            zoomScale={activeZoomScale}
+            zoomScale={activeZoomScale * povScale}
+            allowFingerControls={allowFingerElementControls}
             isReadOnly={isAudienceViewer}
             hideChrome={isAudienceViewer && hideAudienceChrome}
             disableTwoFingerPinch={
@@ -4238,7 +4441,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               showTransformBox={isThisTransform}
               isEditing={isThisEditing}
               isEraserActive={isAnyEraseActive}
-              zoomScale={activeZoomScale}
+              zoomScale={activeZoomScale * povScale}
+              allowFingerControls={allowFingerElementControls}
               isReadOnly={isAudienceViewer}
               hideChrome={isAudienceViewer && hideAudienceChrome}
               passThroughBody={mode === 'drawing' || mode === 'geometric' || isAnyEraseActive}
@@ -4276,11 +4480,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             }}
             className={`drawing-layer absolute inset-0 touch-none ${
               mode === 'drawing' ||
-              mode === 'geometric' ||
-              mode === 'dictate' ||
               isAnyEraseActive ||
               (touchInputMode === 'stylus_and_hand' && leftToolbarTool !== 'pointer')
-                ? 'z-40'
+                ? 'z-[45]'
+                : mode === 'geometric' || mode === 'dictate'
+                ? 'z-[38]'
                 : 'z-20'
             } ${
               touchInputMode === 'stylus_and_hand' && leftToolbarTool === 'zoom'
@@ -4343,6 +4547,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 rotation={magicGroupRotation}
                 anchorRef={grabBoxRef}
                 isOpen={!isSelectionEmpty && isMagicJoystickOpen}
+                allowFingerControls={allowFingerElementControls}
                 onToggleOpen={() => {
                   if (!isSelectionEmpty) {
                     setIsMagicJoystickOpen((prev) => !prev);
@@ -4413,10 +4618,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 inlineWithContent={
                   <>
                     <div
-                      onMouseDown={handleCompassMouseDown}
-                      onTouchStart={handleCompassTouchStart}
+                      onPointerDown={handleCompassPointerDown}
                       title="Click and hold for a moment or drag to move selected items"
-                      className={`relative flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold shadow-md cursor-grab active:cursor-grabbing transition-all select-none whitespace-nowrap ${
+                      className={`relative touch-none flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold shadow-md cursor-grab active:cursor-grabbing transition-all select-none whitespace-nowrap ${
                         isCompassRepositioning
                           ? 'bg-indigo-600 text-white ring-2 ring-indigo-400 scale-105'
                           : isSelectionEmpty
@@ -4748,27 +4952,59 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         onStateChange={onPresenterStateChange}
       />
 
-      {/* 10. FLOATING ZOOM CONTROLS */}
+      {/* 10. FLOATING ZOOM CONTROLS (Transparent with no box underneath when idle; opaque on use) */}
       {!isAudienceViewer && (
-        <div className="floating-zoom absolute bottom-3 right-3 z-40 flex items-center gap-1 bg-white/90 dark:bg-slate-800/90 backdrop-blur-md px-2 py-1 rounded-full shadow-lg border border-slate-200 dark:border-slate-700 text-xs select-none">
+        <div
+          ref={zoomControlRef}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            setIsZoomControlActive(true);
+          }}
+          onTouchStart={(e) => e.stopPropagation()}
+          className={`floating-zoom pointer-events-auto absolute bottom-3 right-3 z-40 flex items-center gap-1 px-2 py-1 rounded-full border text-xs select-none transition-opacity duration-150 ${
+            isZoomControlActive
+              ? 'opacity-100 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg'
+              : 'opacity-25 hover:opacity-70 bg-transparent border-transparent shadow-none'
+          }`}
+        >
           <button
             type="button"
             title="Zoom Out"
-            onClick={() => setZoomScale((prev) => Math.max(0.6, prev - 0.25))}
-            className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full text-slate-600 dark:text-slate-300"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsZoomControlActive(true);
+              setZoomScale((prev) => Math.max(0.6, prev - 0.25));
+            }}
+            className={`p-1 rounded-full text-slate-700 dark:text-slate-200 ${
+              isZoomControlActive ? 'hover:bg-slate-100 dark:hover:bg-slate-700' : ''
+            }`}
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
 
-          <span className="font-mono text-[11px] font-bold text-slate-700 dark:text-slate-200 w-11 text-center">
+          <button
+            type="button"
+            title="Zoom Controls"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsZoomControlActive(true);
+            }}
+            className="font-mono text-[11px] font-bold text-slate-700 dark:text-slate-200 w-11 text-center"
+          >
             {Math.round(zoomScale * 100)}%
-          </span>
+          </button>
 
           <button
             type="button"
             title="Zoom In"
-            onClick={() => setZoomScale((prev) => Math.min(3.5, prev + 0.25))}
-            className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full text-slate-600 dark:text-slate-300"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsZoomControlActive(true);
+              setZoomScale((prev) => Math.min(3.5, prev + 0.25));
+            }}
+            className={`p-1 rounded-full text-slate-700 dark:text-slate-200 ${
+              isZoomControlActive ? 'hover:bg-slate-100 dark:hover:bg-slate-700' : ''
+            }`}
           >
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
@@ -4777,11 +5013,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             <button
               type="button"
               title="Reset Zoom & Pan (100%)"
-              onClick={() => {
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsZoomControlActive(true);
                 setZoomScale(1);
                 setPanOffset({ x: 0, y: 0 });
               }}
-              className="flex items-center gap-1 px-1.5 py-0.5 ml-1 rounded-full bg-slate-100 dark:bg-slate-700 text-[10px] font-medium text-slate-600 dark:text-slate-300 hover:bg-blue-50 hover:text-blue-600"
+              className={`flex items-center gap-1 px-1.5 py-0.5 ml-1 rounded-full text-[10px] font-medium text-slate-700 dark:text-slate-200 ${
+                isZoomControlActive
+                  ? 'bg-slate-100 dark:bg-slate-700 hover:bg-blue-50 hover:text-blue-600'
+                  : 'bg-transparent'
+              }`}
             >
               <RotateCcw className="w-3 h-3" />
               <span>Reset</span>

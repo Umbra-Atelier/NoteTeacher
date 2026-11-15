@@ -7,6 +7,7 @@ interface CanvasImageBoxProps {
   image: CanvasImage;
   isActive: boolean;
   zoomScale?: number;
+  allowFingerControls?: boolean;
   isReadOnly?: boolean;
   hideChrome?: boolean;
   onSelect: () => void;
@@ -18,6 +19,7 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
   image,
   isActive,
   zoomScale = 1,
+  allowFingerControls = true,
   isReadOnly = false,
   hideChrome = false,
   onSelect,
@@ -25,12 +27,13 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
   onDelete,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const lastPointerTypeRef = useRef<string>('mouse');
   const [isDragging, setIsDragging] = useState(false);
   const [isRepositioningActive, setIsRepositioningActive] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0, imageX: 0, imageY: 0 });
   const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Click & Hold for 500ms on Top-Left Compass Handle to activate repositioning
+  // Click & Hold / Drag on Top-Left Compass Handle to activate repositioning
   const startTopLeftHold = (clientX: number, clientY: number) => {
     if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
     setDragStart({ x: clientX, y: clientY, imageX: image.x, imageY: image.y });
@@ -48,19 +51,13 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
     }
   };
 
-  const handleMouseDownTopLeft = (e: React.MouseEvent) => {
+  const handlePointerDownTopLeft = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
+    e.preventDefault();
     e.stopPropagation();
+    onSelect();
     startTopLeftHold(e.clientX, e.clientY);
     setIsDragging(true);
-  };
-
-  const handleTouchStartTopLeft = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      const t = e.touches[0];
-      startTopLeftHold(t.clientX, t.clientY);
-      setIsDragging(true);
-    }
   };
 
   // Smooth, lag-free Drag Moving synced with zoomScale and display refresh rate
@@ -82,17 +79,13 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
       rafId = null;
     };
 
-    const handleMove = (clientX: number, clientY: number) => {
-      latestClientX = clientX;
-      latestClientY = clientY;
+    const handlePointerMove = (e: PointerEvent) => {
+      e.preventDefault();
+      latestClientX = e.clientX;
+      latestClientY = e.clientY;
       if (!rafId) {
         rafId = requestAnimationFrame(updatePosition);
       }
-    };
-
-    const handleMouseMove = (e: MouseEvent) => handleMove(e.clientX, e.clientY);
-    const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) handleMove(e.touches[0].clientX, e.touches[0].clientY);
     };
     const handleEnd = () => {
       if (rafId) cancelAnimationFrame(rafId);
@@ -101,16 +94,14 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
       setIsRepositioningActive(false);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleEnd);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleEnd);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleEnd);
+    window.addEventListener('pointercancel', handleEnd);
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleEnd);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handleEnd);
+      window.removeEventListener('pointercancel', handleEnd);
     };
   }, [isDragging, dragStart, onUpdate, zoomScale]);
 
@@ -122,9 +113,10 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
     const aspect = startW / startH;
     const scale = zoomScale || 1;
 
-    const onMove = (clientX: number, clientY: number) => {
-      const dx = (clientX - startX) / scale;
-      const dy = (startY - clientY) / scale; // upward is expansion
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      const dx = (ev.clientX - startX) / scale;
+      const dy = (startY - ev.clientY) / scale; // upward is expansion
       const delta = (dx + dy) / 2;
       const newW = Math.max(60, Math.min(1200, startW + delta));
       const newH = newW / aspect;
@@ -137,33 +129,23 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
       });
     };
 
-    const onMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const onTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) onMove(ev.touches[0].clientX, ev.touches[0].clientY);
-    };
     const onEnd = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onEnd);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onEnd);
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
   };
 
-  const handleMouseDownResizeTR = (e: React.MouseEvent) => {
+  const handlePointerDownResizeTR = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
+    e.preventDefault();
     e.stopPropagation();
+    onSelect();
     startResizeTR(e.clientX, e.clientY);
-  };
-
-  const handleTouchStartResizeTR = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      startResizeTR(e.touches[0].clientX, e.touches[0].clientY);
-    }
   };
 
   // Proportional Resizing by holding down the Bottom-Left L-Grab
@@ -173,10 +155,11 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
     const startH = image.height;
     const aspect = startW / startH;
 
-    const onMove = (clientX: number, clientY: number) => {
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
       const scale = zoomScale || 1;
-      const dx = (startX - clientX) / scale; // leftward is expansion
-      const dy = (clientY - startY) / scale; // downward is expansion
+      const dx = (startX - ev.clientX) / scale; // leftward is expansion
+      const dy = (ev.clientY - startY) / scale; // downward is expansion
       const delta = (dx + dy) / 2;
       const newW = Math.max(60, Math.min(1200, startW + delta));
       const newH = newW / aspect;
@@ -189,43 +172,39 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
       });
     };
 
-    const onMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const onTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) onMove(ev.touches[0].clientX, ev.touches[0].clientY);
-    };
     const onEnd = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onEnd);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onEnd);
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
   };
 
-  const handleMouseDownResizeBL = (e: React.MouseEvent) => {
+  const handlePointerDownResizeBL = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
+    e.preventDefault();
     e.stopPropagation();
+    onSelect();
     startResizeBL(e.clientX, e.clientY);
-  };
-
-  const handleTouchStartResizeBL = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      startResizeBL(e.touches[0].clientX, e.touches[0].clientY);
-    }
   };
 
   return (
     <div
       ref={containerRef}
       onClick={(e) => {
+        if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
         e.stopPropagation();
         onSelect();
       }}
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => {
+        lastPointerTypeRef.current = e.pointerType;
+        if (e.pointerType === 'touch' && !allowFingerControls) return;
+        e.stopPropagation();
+        onSelect();
+      }}
       className={`picture-box absolute select-none shadow-xl rounded-xl transition-shadow ${
         isActive
           ? 'ring-2 ring-indigo-500 shadow-2xl z-40'
@@ -248,11 +227,9 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
           {/* TOP-RIGHT L-GRAB RESIZE HANDLE (Proportional, Non-Free-Form)    */}
           {/* ============================================================== */}
           <div
-            onMouseDown={handleMouseDownResizeTR}
-            onTouchStart={handleTouchStartResizeTR}
-            onPointerDown={(e) => e.stopPropagation()}
+            onPointerDown={handlePointerDownResizeTR}
             title="Drag L-handle to resize image snippet (preserves aspect ratio)"
-            className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto"
+            className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
           >
             <div className="w-5 h-5 border-t-3 border-r-3 border-indigo-500 rounded-tr-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-400">
               <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full" />
@@ -263,11 +240,9 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
           {/* BOTTOM-LEFT L-GRAB RESIZE HANDLE (Proportional, Non-Free-Form)  */}
           {/* ============================================================== */}
           <div
-            onMouseDown={handleMouseDownResizeBL}
-            onTouchStart={handleTouchStartResizeBL}
-            onPointerDown={(e) => e.stopPropagation()}
+            onPointerDown={handlePointerDownResizeBL}
             title="Drag L-handle to resize image snippet (preserves aspect ratio)"
-            className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto"
+            className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
           >
             <div className="w-5 h-5 border-b-3 border-l-3 border-indigo-500 rounded-bl-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-400">
               <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full" />
@@ -290,11 +265,9 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
             >
               <div className="flex items-center gap-2 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md px-1.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 shadow-lg select-none">
                 <div
-                  onMouseDown={handleMouseDownTopLeft}
-                  onTouchStart={handleTouchStartTopLeft}
-                  onPointerDown={(e) => e.stopPropagation()}
+                  onPointerDown={handlePointerDownTopLeft}
                   title="Click and hold for a moment to move image snippet"
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold cursor-grab active:cursor-grabbing transition-all select-none shadow-xs ${
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold cursor-grab active:cursor-grabbing transition-all select-none shadow-xs touch-none ${
                     isRepositioningActive
                       ? 'bg-indigo-600 text-white ring-2 ring-indigo-400 shadow-md'
                       : 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200'
@@ -308,7 +281,13 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
 
                 <button
                   type="button"
+                  onPointerDown={(e) => {
+                    lastPointerTypeRef.current = e.pointerType;
+                    if (e.pointerType === 'touch' && !allowFingerControls) return;
+                    e.stopPropagation();
+                  }}
                   onClick={(e) => {
+                    if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
                     e.stopPropagation();
                     onDelete();
                   }}
@@ -322,11 +301,9 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
           ) : (
             <div className="absolute top-1.5 left-1.5 right-1.5 flex items-center justify-between opacity-0 hover:opacity-100 focus-within:opacity-100 transition-opacity pointer-events-auto select-none">
               <div
-                onMouseDown={handleMouseDownTopLeft}
-                onTouchStart={handleTouchStartTopLeft}
-                onPointerDown={(e) => e.stopPropagation()}
+                onPointerDown={handlePointerDownTopLeft}
                 title="Click and hold for a second to move image snippet"
-                className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold cursor-grab active:cursor-grabbing bg-indigo-600/90 text-white shadow-sm"
+                className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold cursor-grab active:cursor-grabbing bg-indigo-600/90 text-white shadow-sm touch-none"
               >
                 <Move className="w-3 h-3 stroke-[2.5]" />
                 <span>Move</span>
@@ -334,7 +311,13 @@ export const CanvasImageBox: React.FC<CanvasImageBoxProps> = ({
 
               <button
                 type="button"
+                onPointerDown={(e) => {
+                  lastPointerTypeRef.current = e.pointerType;
+                  if (e.pointerType === 'touch' && !allowFingerControls) return;
+                  e.stopPropagation();
+                }}
                 onClick={(e) => {
+                  if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
                   e.stopPropagation();
                   onDelete();
                 }}

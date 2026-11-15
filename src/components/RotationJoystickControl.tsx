@@ -6,6 +6,7 @@ interface RotationJoystickControlProps {
   rotation: number;
   anchorRef: React.RefObject<HTMLElement | null>;
   isOpen: boolean;
+  allowFingerControls?: boolean;
   onToggleOpen: () => void;
   onCommitHistory?: () => void;
   onRotateDelta: (deltaDeg: number) => void;
@@ -27,6 +28,7 @@ export const RotationJoystickControl: React.FC<RotationJoystickControlProps> = (
   rotation,
   anchorRef,
   isOpen,
+  allowFingerControls = true,
   onToggleOpen,
   onCommitHistory,
   onRotateDelta,
@@ -38,6 +40,7 @@ export const RotationJoystickControl: React.FC<RotationJoystickControlProps> = (
   onDraggingChange,
 }) => {
   const joystickPadRef = useRef<HTMLDivElement>(null);
+  const lastPointerTypeRef = useRef<string>('mouse');
   const [isDraggingJoystick, setIsDraggingJoystick] = useState(false);
   const [joystickKnob, setJoystickKnob] = useState<{ x: number; y: number }>({ x: 0, y: -26 });
 
@@ -114,26 +117,21 @@ export const RotationJoystickControl: React.FC<RotationJoystickControlProps> = (
       }
     };
 
-    const handleMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const handleTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) {
-        ev.preventDefault();
-        onMove(ev.touches[0].clientX, ev.touches[0].clientY);
-      }
+    const handlePointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      onMove(ev.clientX, ev.clientY);
     };
     const handleEnd = () => {
       setIsDraggingJoystick(false);
       onDraggingChangeRef.current?.(false);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleEnd);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handleEnd);
+      window.removeEventListener('pointercancel', handleEnd);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleEnd);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleEnd);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleEnd);
+    window.addEventListener('pointercancel', handleEnd);
   };
 
   const isIndigo = accent === 'indigo';
@@ -182,17 +180,12 @@ export const RotationJoystickControl: React.FC<RotationJoystickControlProps> = (
 
             <div
               ref={joystickPadRef}
-              onMouseDown={(e) => {
+              onPointerDown={(e) => {
+                if (e.pointerType === 'touch' && !allowFingerControls) return;
+                e.preventDefault();
                 e.stopPropagation();
                 startJoystickDrag(e.clientX, e.clientY);
               }}
-              onTouchStart={(e) => {
-                e.stopPropagation();
-                if (e.touches.length === 1) {
-                  startJoystickDrag(e.touches[0].clientX, e.touches[0].clientY);
-                }
-              }}
-              onPointerDown={(e) => e.stopPropagation()}
               className={`relative w-20 h-20 rounded-full bg-slate-100 dark:bg-slate-800 border-2 ${padBorderClass} shadow-inner cursor-grab active:cursor-grabbing flex items-center justify-center touch-none`}
               title="Drag around the joystick to spin smoothly"
             >
@@ -238,13 +231,18 @@ export const RotationJoystickControl: React.FC<RotationJoystickControlProps> = (
           {inlineWithContent}
           <button
             type="button"
+            onPointerDown={(e) => {
+              lastPointerTypeRef.current = e.pointerType;
+              if (e.pointerType === 'touch' && !allowFingerControls) return;
+              e.stopPropagation();
+            }}
             onClick={(e) => {
+              if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
               e.stopPropagation();
               onToggleOpen();
             }}
-            onPointerDown={(e) => e.stopPropagation()}
             title="Click to open Rotation Joystick"
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold shadow-md border transition-all cursor-pointer whitespace-nowrap ${
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold shadow-md border transition-all cursor-pointer whitespace-nowrap touch-none ${
               isOpen
                 ? isIndigo
                   ? 'bg-indigo-600 text-white border-indigo-700 ring-2 ring-indigo-300'

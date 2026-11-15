@@ -7,6 +7,7 @@ interface InteractiveGridBoxProps {
   shape: GeometricShape;
   isActive: boolean;
   zoomScale?: number;
+  allowFingerControls?: boolean;
   isReadOnly?: boolean;
   hideChrome?: boolean;
   onSelect: () => void;
@@ -18,6 +19,7 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
   shape,
   isActive,
   zoomScale = 1,
+  allowFingerControls = true,
   isReadOnly = false,
   hideChrome = false,
   onSelect,
@@ -25,6 +27,7 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
   onDelete,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const lastPointerTypeRef = useRef<string>('mouse');
   const [isDragging, setIsDragging] = useState(false);
   const [isRepositioningActive, setIsRepositioningActive] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0, shapeX: 0, shapeY: 0 });
@@ -38,7 +41,7 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
   const strokeDash =
     shape.strokeStyle === 'dashed' ? '6 4' : shape.strokeStyle === 'dotted' ? '2 3' : undefined;
 
-  // Click & Hold for 400ms on Compass Handle to activate repositioning
+  // Click & Hold / Drag on Compass Handle to activate repositioning
   const startTopLeftHold = (clientX: number, clientY: number) => {
     if (holdTimerRef.current) clearTimeout(holdTimerRef.current);
     setDragStart({ x: clientX, y: clientY, shapeX: shape.x, shapeY: shape.y });
@@ -56,38 +59,27 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
     }
   };
 
-  const handleMouseDownTopLeft = (e: React.MouseEvent) => {
+  const handlePointerDownTopLeft = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
+    e.preventDefault();
     e.stopPropagation();
     startTopLeftHold(e.clientX, e.clientY);
     setIsDragging(true);
-  };
-
-  const handleTouchStartTopLeft = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      const t = e.touches[0];
-      startTopLeftHold(t.clientX, t.clientY);
-      setIsDragging(true);
-    }
   };
 
   // Immediate or Hold-activated Drag Moving (perspective-aware)
   useEffect(() => {
     if (!isDragging) return;
 
-    const handleMove = (clientX: number, clientY: number) => {
+    const handlePointerMove = (e: PointerEvent) => {
+      e.preventDefault();
       const scale = zoomScale || 1;
-      const dx = (clientX - dragStart.x) / scale;
-      const dy = (clientY - dragStart.y) / scale;
+      const dx = (e.clientX - dragStart.x) / scale;
+      const dy = (e.clientY - dragStart.y) / scale;
       onUpdate({
         x: Math.max(0, dragStart.shapeX + dx),
         y: Math.max(0, dragStart.shapeY + dy),
       });
-    };
-
-    const handleMouseMove = (e: MouseEvent) => handleMove(e.clientX, e.clientY);
-    const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) handleMove(e.touches[0].clientX, e.touches[0].clientY);
     };
     const handleEnd = () => {
       cancelTopLeftHold();
@@ -95,15 +87,13 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
       setIsRepositioningActive(false);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleEnd);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleEnd);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleEnd);
+    window.addEventListener('pointercancel', handleEnd);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleEnd);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handleEnd);
+      window.removeEventListener('pointercancel', handleEnd);
     };
   }, [isDragging, dragStart, onUpdate, zoomScale]);
 
@@ -115,9 +105,10 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
     const aspect = startW / startH;
     const scale = zoomScale || 1;
 
-    const onMove = (clientX: number, clientY: number) => {
-      const dx = (clientX - startX) / scale;
-      const dy = (startY - clientY) / scale;
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      const dx = (ev.clientX - startX) / scale;
+      const dy = (startY - ev.clientY) / scale;
       const delta = (dx + dy) / 2;
       const newW = Math.max(60, Math.min(1400, startW + delta));
       const newH = newW / aspect;
@@ -133,33 +124,22 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
       });
     };
 
-    const onMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const onTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) onMove(ev.touches[0].clientX, ev.touches[0].clientY);
-    };
     const onEnd = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onEnd);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onEnd);
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
   };
 
-  const handleMouseDownResizeTR = (e: React.MouseEvent) => {
+  const handlePointerDownResizeTR = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
+    e.preventDefault();
     e.stopPropagation();
     startResizeTR(e.clientX, e.clientY);
-  };
-
-  const handleTouchStartResizeTR = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      startResizeTR(e.touches[0].clientX, e.touches[0].clientY);
-    }
   };
 
   // Bottom-Left L-Grab Resizing (Number of lines remains frozen, scaled by perspective zoom)
@@ -170,9 +150,10 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
     const aspect = startW / startH;
     const scale = zoomScale || 1;
 
-    const onMove = (clientX: number, clientY: number) => {
-      const dx = (startX - clientX) / scale;
-      const dy = (clientY - startY) / scale;
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      const dx = (startX - ev.clientX) / scale;
+      const dy = (ev.clientY - startY) / scale;
       const delta = (dx + dy) / 2;
       const newW = Math.max(60, Math.min(1400, startW + delta));
       const newH = newW / aspect;
@@ -187,33 +168,22 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
       });
     };
 
-    const onMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const onTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) onMove(ev.touches[0].clientX, ev.touches[0].clientY);
-    };
     const onEnd = () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onEnd);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
     };
 
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onEnd);
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
   };
 
-  const handleMouseDownResizeBL = (e: React.MouseEvent) => {
+  const handlePointerDownResizeBL = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
+    e.preventDefault();
     e.stopPropagation();
     startResizeBL(e.clientX, e.clientY);
-  };
-
-  const handleTouchStartResizeBL = (e: React.TouchEvent) => {
-    e.stopPropagation();
-    if (e.touches.length === 1) {
-      startResizeBL(e.touches[0].clientX, e.touches[0].clientY);
-    }
   };
 
   const w = Math.max(20, shape.width);
@@ -223,10 +193,15 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
     <div
       ref={containerRef}
       onClick={(e) => {
+        if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
         e.stopPropagation();
         onSelect();
       }}
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => {
+        lastPointerTypeRef.current = e.pointerType;
+        if (e.pointerType === 'touch' && !allowFingerControls) return;
+        e.stopPropagation();
+      }}
       className={`interactive-grid-box absolute select-none transition-shadow ${
         isActive
           ? 'ring-2 ring-indigo-500 shadow-xl z-40'
@@ -306,11 +281,9 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
         <>
           {/* TOP-RIGHT L-GRAB RESIZE HANDLE (Proportional) */}
           <div
-            onMouseDown={handleMouseDownResizeTR}
-            onTouchStart={handleTouchStartResizeTR}
-            onPointerDown={(e) => e.stopPropagation()}
+            onPointerDown={handlePointerDownResizeTR}
             title="Drag L-handle to resize grid (line count remains preserved)"
-            className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto"
+            className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
           >
             <div className="w-5 h-5 border-t-3 border-r-3 border-indigo-600 rounded-tr-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-500">
               <div className="w-1.5 h-1.5 bg-indigo-600 rounded-full" />
@@ -319,11 +292,9 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
 
           {/* BOTTOM-LEFT L-GRAB RESIZE HANDLE (Proportional) */}
           <div
-            onMouseDown={handleMouseDownResizeBL}
-            onTouchStart={handleTouchStartResizeBL}
-            onPointerDown={(e) => e.stopPropagation()}
+            onPointerDown={handlePointerDownResizeBL}
             title="Drag L-handle to resize grid (line count remains preserved)"
-            className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto"
+            className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
           >
             <div className="w-5 h-5 border-b-3 border-l-3 border-indigo-600 rounded-bl-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-500">
               <div className="w-1.5 h-1.5 bg-indigo-600 rounded-full" />
@@ -342,11 +313,9 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
           >
             <div className="flex items-center gap-2 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md px-1.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 shadow-lg select-none">
               <div
-                onMouseDown={handleMouseDownTopLeft}
-                onTouchStart={handleTouchStartTopLeft}
-                onPointerDown={(e) => e.stopPropagation()}
+                onPointerDown={handlePointerDownTopLeft}
                 title="Click and hold for a moment to move graphing grid"
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold cursor-grab active:cursor-grabbing transition-all select-none shadow-xs ${
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold cursor-grab active:cursor-grabbing transition-all select-none shadow-xs touch-none ${
                   isRepositioningActive
                     ? 'bg-indigo-600 text-white ring-2 ring-indigo-400 shadow-md'
                     : 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200'
@@ -367,7 +336,13 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
 
               <button
                 type="button"
+                onPointerDown={(e) => {
+                  lastPointerTypeRef.current = e.pointerType;
+                  if (e.pointerType === 'touch' && !allowFingerControls) return;
+                  e.stopPropagation();
+                }}
                 onClick={(e) => {
+                  if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
                   e.stopPropagation();
                   onDelete();
                 }}

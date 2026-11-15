@@ -1,5 +1,21 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Maximize2, X, CheckCircle2, AlertCircle, Loader2, Mic, MicOff } from 'lucide-react';
+import {
+  Maximize2,
+  X,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  Mic,
+  MicOff,
+  ArrowLeft,
+  ArrowRight,
+  Copy,
+  Plus,
+  FileText,
+  AlignLeft,
+  Grid,
+  CircleDot,
+} from 'lucide-react';
 import {
   AngleNegativeDirection,
   AppMode,
@@ -454,6 +470,17 @@ export default function App() {
 
   const scrollPageRafRef = useRef<number | null>(null);
 
+  // Workspace viewport size & POV (Point-of-View) zoom state
+  const [mainViewportSize, setMainViewportSize] = useState<{ width: number; height: number }>({
+    width: typeof window !== 'undefined' ? window.innerWidth : 1024,
+    height: typeof window !== 'undefined' ? Math.max(360, window.innerHeight - 108) : 700,
+  });
+  const [isFullPovMode, setIsFullPovMode] = useState<boolean>(false);
+  const [povZoomFactor, setPovZoomFactor] = useState<number>(1);
+  const povPinchRef = useRef<{ initialDist: number; initialZoom: number } | null>(null);
+  const [isBottomAddPageOpen, setIsBottomAddPageOpen] = useState<boolean>(false);
+  const bottomAddPageRef = useRef<HTMLDivElement | null>(null);
+
   const computeScrollPageIndicatorNow = useCallback(() => {
     const mainEl = mainScrollRef.current;
     const allPages = pagesRef.current;
@@ -599,6 +626,121 @@ export default function App() {
   const isViewerTab =
     typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('view') === 'viewer';
+
+  useEffect(() => {
+    const mainEl = mainScrollRef.current;
+    if (!mainEl) return;
+    const syncSize = () => {
+      if (mainEl.clientWidth > 0 && mainEl.clientHeight > 0) {
+        setMainViewportSize((prev) =>
+          prev.width === mainEl.clientWidth && prev.height === mainEl.clientHeight
+            ? prev
+            : { width: mainEl.clientWidth, height: mainEl.clientHeight }
+        );
+      }
+    };
+    syncSize();
+    const ro = new ResizeObserver(syncSize);
+    ro.observe(mainEl);
+    window.addEventListener('resize', syncSize);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', syncSize);
+    };
+  }, [isViewerTab]);
+
+  useEffect(() => {
+    if (!isBottomAddPageOpen) return;
+    const handleOutside = (e: PointerEvent) => {
+      if (bottomAddPageRef.current && !bottomAddPageRef.current.contains(e.target as Node)) {
+        setIsBottomAddPageOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', handleOutside, { capture: true });
+    return () => window.removeEventListener('pointerdown', handleOutside, { capture: true });
+  }, [isBottomAddPageOpen]);
+
+  // Allow two-finger pinch outside PDF/page boxes to zoom the entire workspace POV
+  useEffect(() => {
+    const mainEl = mainScrollRef.current;
+    if (!mainEl || isViewerTab) return;
+
+    const filterAllowedTouches = (touches: TouchList): Touch[] => {
+      const list = Array.from(touches);
+      if (touchInputMode === 'two_finger_stylus') {
+        const hasStylusTouch = list.some(
+          (t) => (t as Touch & { touchType?: string }).touchType === 'stylus'
+        );
+        if (hasStylusTouch) {
+          return list.filter(
+            (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
+          );
+        }
+        if (stylusConfig.detectionMode === 'smart_tip') {
+          const maxR = (stylusConfig.maxTipSizePx ?? 14) / 2;
+          return list.filter((t) => {
+            const rx = t.radiusX || 0;
+            const ry = t.radiusY || 0;
+            return !(rx > 0 && ry > 0 && Math.max(rx, ry) <= maxR);
+          });
+        }
+      }
+      return list;
+    };
+
+    const handleMainTouchStart = (e: TouchEvent) => {
+      if (touchInputMode !== 'two_finger' && touchInputMode !== 'two_finger_stylus') {
+        return;
+      }
+      const fingerTouches = filterAllowedTouches(e.touches);
+      if (fingerTouches.length < 2) return;
+      const targetEl = e.target as HTMLElement | null;
+      if (targetEl?.closest('[data-page-id]')) return;
+      e.preventDefault();
+      const d = Math.hypot(
+        fingerTouches[0].clientX - fingerTouches[1].clientX,
+        fingerTouches[0].clientY - fingerTouches[1].clientY
+      );
+      povPinchRef.current = { initialDist: Math.max(1, d), initialZoom: povZoomFactor };
+    };
+
+    const handleMainTouchMove = (e: TouchEvent) => {
+      if (touchInputMode !== 'two_finger' && touchInputMode !== 'two_finger_stylus') {
+        povPinchRef.current = null;
+        return;
+      }
+      const fingerTouches = filterAllowedTouches(e.touches);
+      if (!povPinchRef.current || fingerTouches.length < 2) return;
+      e.preventDefault();
+      const d = Math.hypot(
+        fingerTouches[0].clientX - fingerTouches[1].clientX,
+        fingerTouches[0].clientY - fingerTouches[1].clientY
+      );
+      const nextFactor = Math.max(
+        0.75,
+        Math.min(2.5, povPinchRef.current.initialZoom * (d / povPinchRef.current.initialDist))
+      );
+      setPovZoomFactor(nextFactor);
+    };
+
+    const handleMainTouchEnd = (e: TouchEvent) => {
+      const fingerTouches = filterAllowedTouches(e.touches);
+      if (fingerTouches.length < 2) {
+        povPinchRef.current = null;
+      }
+    };
+
+    mainEl.addEventListener('touchstart', handleMainTouchStart, { passive: false });
+    mainEl.addEventListener('touchmove', handleMainTouchMove, { passive: false });
+    mainEl.addEventListener('touchend', handleMainTouchEnd);
+    mainEl.addEventListener('touchcancel', handleMainTouchEnd);
+    return () => {
+      mainEl.removeEventListener('touchstart', handleMainTouchStart);
+      mainEl.removeEventListener('touchmove', handleMainTouchMove);
+      mainEl.removeEventListener('touchend', handleMainTouchEnd);
+      mainEl.removeEventListener('touchcancel', handleMainTouchEnd);
+    };
+  }, [isViewerTab, povZoomFactor, touchInputMode, stylusConfig]);
 
   // Live Teacher Document Frame & Camera Viewport Sync for Audience View
   const [teacherViewportSize, setTeacherViewportSize] = useState<{ width: number; height: number }>({
@@ -2606,7 +2748,14 @@ export default function App() {
 
   const handleChangeTemplate = (tmpl: PaperTemplate) => {
     setPages((prev) =>
-      prev.map((p) => (p.id === currentPageId ? { ...p, template: tmpl } : p))
+      prev.map((p) => {
+        if (p.id !== currentPageId) return p;
+        // Preserve PDF pages cleanly: changing background template controls the pattern underneath the PDF
+        if (p.template === 'pdf' || p.pdfSourceId || p.pdfDataUrl) {
+          return { ...p, template: 'pdf', underlayTemplate: tmpl };
+        }
+        return { ...p, template: tmpl };
+      })
     );
   };
 
@@ -3327,7 +3476,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans">
+    <div className="flex flex-col h-screen w-screen overflow-hidden overscroll-none bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans">
       {/* 1. TOP BAR RIBBON */}
       <TopBarRibbon
         mode={mode}
@@ -3407,6 +3556,7 @@ export default function App() {
         presenterMode={presenterMode}
         onSetPresenterMode={setPresenterMode}
         currentTemplate={currentPage?.template || 'grid'}
+        currentUnderlayTemplate={currentPage?.underlayTemplate}
         onSetTemplate={handleChangeTemplate}
         onUploadPdf={handleUploadPdf}
         isDarkMode={isDarkMode}
@@ -3439,7 +3589,55 @@ export default function App() {
       />
 
       {/* 2. MAIN VIRTUALIZED WORKSPACE CANVAS (Only viewport-visible pages load; off-screen pages stay blurry placeholders) */}
-      <div className="flex-1 relative flex overflow-hidden">
+      {(() => {
+        const mainW = Math.max(320, mainViewportSize.width);
+        const mainH = Math.max(320, mainViewportSize.height);
+        const regularHorizPad = mainW >= 640 ? 112 : 88;
+        const availRegularW = Math.max(240, mainW - regularHorizPad);
+        const availRegularH = Math.max(320, mainH - 48);
+
+        const computePagePovMetrics = (page: PageData) => {
+          const aspect =
+            page.aspectRatio && page.aspectRatio > 0
+              ? page.aspectRatio
+              : page.pdfWidth && page.pdfHeight && page.pdfHeight > 0
+              ? page.pdfWidth / page.pdfHeight
+              : 8.5 / 11;
+          const regularWidthPx = Math.max(220, Math.min(availRegularW, availRegularH * aspect));
+          const fullWidthPx = Math.max(regularWidthPx, mainW);
+          const baseScale = isFullPovMode ? fullWidthPx / regularWidthPx : 1;
+          const maxRegularFactor = fullWidthPx / regularWidthPx;
+          const clampedFactor = isFullPovMode
+            ? povZoomFactor
+            : Math.min(maxRegularFactor, Math.max(0.75, povZoomFactor));
+          const povScale = baseScale * clampedFactor;
+          const renderedWidthPx = regularWidthPx * povScale;
+          return { regularWidthPx, povScale, renderedWidthPx };
+        };
+
+        const activeVisiblePage =
+          pages[Math.max(0, Math.min(pages.length - 1, scrollPageNumber - 1))] ||
+          currentPage ||
+          pages[0];
+        const activeMetrics = activeVisiblePage
+          ? computePagePovMetrics(activeVisiblePage)
+          : { regularWidthPx: 600, povScale: 1, renderedWidthPx: 600 };
+
+        const pageLeftPx = Math.max(44, (mainW - activeMetrics.renderedWidthPx) / 2);
+        const pageRightPx = Math.min(mainW - 44, (mainW + activeMetrics.renderedWidthPx) / 2);
+        const rightSpacePx = Math.max(0, mainW - pageRightPx);
+
+        const handleToggleFullPov = () => {
+          setIsFullPovMode((prev) => {
+            const next = !prev;
+            setPovZoomFactor(1);
+            setIsBottomAddPageOpen(false);
+            return next;
+          });
+        };
+
+        return (
+      <div className="flex-1 relative flex overflow-hidden overscroll-none">
         <main
           ref={mainScrollRef}
           onScroll={() => {
@@ -3458,6 +3656,10 @@ export default function App() {
             }
           }}
           onTouchStart={(e) => {
+            if (touchInputMode === 'stylus_only') {
+              rightEdgeTouchStartRef.current = null;
+              return;
+            }
             const mainEl = mainScrollRef.current;
             if (!mainEl || e.touches.length !== 1) {
               rightEdgeTouchStartRef.current = null;
@@ -3472,6 +3674,7 @@ export default function App() {
             }
           }}
           onTouchMove={(e) => {
+            if (touchInputMode === 'stylus_only') return;
             const st = rightEdgeTouchStartRef.current;
             if (!st || !st.inZone || e.touches.length !== 1) return;
             const dy = Math.abs(e.touches[0].clientY - st.y);
@@ -3492,7 +3695,8 @@ export default function App() {
               const isInsideDrawingCanvas = Boolean(targetEl?.closest('.drawing-layer'));
               if (
                 isInsideDrawingCanvas &&
-                (stageMode === 'drawing' ||
+                (e.pointerType === 'pen' ||
+                  stageMode === 'drawing' ||
                   stageMode === 'geometric' ||
                   stageMode === 'dictate')
               ) {
@@ -3537,10 +3741,17 @@ export default function App() {
               rightEdgeSwipeRef.current = null;
             }
           }}
-          className="flex-1 h-full overflow-y-auto overflow-x-hidden bg-slate-200/70 dark:bg-slate-950 p-4 sm:p-6 flex flex-col items-center gap-6"
+          className={`flex-1 h-full overflow-y-auto overscroll-none ${
+            touchInputMode === 'stylus_only' ? 'touch-none' : 'touch-pan-y'
+          } bg-slate-200/70 dark:bg-slate-950 flex flex-col items-center gap-6 ${
+            isFullPovMode
+              ? 'px-0 py-2 overflow-x-auto'
+              : 'px-11 sm:px-14 py-4 sm:py-6 overflow-x-hidden'
+          }`}
         >
           {pages.map((page, idx) => {
             const isSlotActive = page.id === currentPageId;
+            const { regularWidthPx, povScale } = computePagePovMetrics(page);
             return (
               <VirtualizedPageSlot
                 key={page.id}
@@ -3551,6 +3762,9 @@ export default function App() {
                 scrollContainerRef={mainScrollRef}
                 onRegisterPageElement={registerPageElement}
                 onActivatePage={handleActivatePage}
+                regularWidthPx={regularWidthPx}
+                povScale={povScale}
+                isFullPovMode={isFullPovMode}
                 mode={stageMode}
                 touchInputMode={touchInputMode}
                 stylusConfig={stylusConfig}
@@ -3628,6 +3842,120 @@ export default function App() {
           })}
         </main>
 
+        {/* Left & Right POV Toggle Arrows (outward in regular POV -> inward at tab edges in Full POV) */}
+        <button
+          type="button"
+          onClick={handleToggleFullPov}
+          title={isFullPovMode ? 'Exit Full POV View' : 'Expand to Full POV View'}
+          style={
+            isFullPovMode
+              ? { left: touchInputMode === 'stylus_and_hand' ? '64px' : '8px' }
+              : { left: `${Math.max(8, pageLeftPx - 44)}px` }
+          }
+          className="absolute top-1/2 -translate-y-1/2 z-40 w-9 h-9 rounded-full bg-white/90 dark:bg-slate-800/90 hover:bg-blue-600 hover:text-white text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-700 shadow-lg flex items-center justify-center transition-colors cursor-pointer"
+        >
+          {isFullPovMode ? <ArrowRight className="w-4 h-4" /> : <ArrowLeft className="w-4 h-4" />}
+        </button>
+
+        <button
+          type="button"
+          onClick={handleToggleFullPov}
+          title={isFullPovMode ? 'Exit Full POV View' : 'Expand to Full POV View'}
+          style={
+            isFullPovMode
+              ? { right: '8px' }
+              : { left: `${Math.min(mainW - 44, pageRightPx + 8)}px` }
+          }
+          className="absolute top-1/2 -translate-y-1/2 z-40 w-9 h-9 rounded-full bg-white/90 dark:bg-slate-800/90 hover:bg-blue-600 hover:text-white text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-700 shadow-lg flex items-center justify-center transition-colors cursor-pointer"
+        >
+          {isFullPovMode ? <ArrowLeft className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}
+        </button>
+
+        {/* Regular POV Bottom-Right Outside Controls: Page Number, Copy Current Page, Add Page + Background */}
+        {!isFullPovMode && (
+          <div
+            ref={bottomAddPageRef}
+            style={
+              rightSpacePx >= 260
+                ? { left: `${pageRightPx + 14}px`, bottom: '16px' }
+                : rightSpacePx >= 112
+                ? { left: `${pageRightPx + 10}px`, bottom: '16px' }
+                : { right: '10px', bottom: '14px' }
+            }
+            className="absolute z-40 flex flex-col items-end gap-1.5 select-none"
+          >
+            {isBottomAddPageOpen && (
+              <div className="mb-1 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-1.5 space-y-0.5">
+                <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Add Page Background
+                </div>
+                {(
+                  [
+                    { id: 'blank', label: 'Blank Whiteboard', Icon: FileText },
+                    { id: 'lined', label: 'Lined Notebook', Icon: AlignLeft },
+                    { id: 'graph', label: 'Graph Paper', Icon: Grid },
+                    { id: 'dotted', label: 'Dotted Grid', Icon: CircleDot },
+                  ] as const
+                ).map(({ id, label, Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      setIsBottomAddPageOpen(false);
+                      void handleAddPage(id);
+                    }}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400 transition-colors text-left"
+                  >
+                    <Icon className="w-3.5 h-3.5 shrink-0" />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div
+              className={`flex ${
+                rightSpacePx >= 260 ? 'flex-row items-center' : 'flex-col items-stretch'
+              } gap-1.5 bg-white/95 dark:bg-slate-900/95 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg px-2.5 py-1.5 text-xs`}
+            >
+              <span className="font-semibold text-slate-700 dark:text-slate-200 whitespace-nowrap px-1">
+                Page {scrollPageNumber} / {pages.length}
+              </span>
+
+              <button
+                type="button"
+                title="Copy current page"
+                onClick={() => {
+                  const target =
+                    pages[Math.max(0, Math.min(pages.length - 1, scrollPageNumber - 1))] ||
+                    currentPage;
+                  if (target) {
+                    void handleDuplicatePage(target.id);
+                  }
+                }}
+                className="flex items-center justify-center gap-1 px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 hover:text-blue-600 dark:hover:text-blue-400 font-medium transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy</span>
+              </button>
+
+              <button
+                type="button"
+                title="Add new page and select background"
+                onClick={() => setIsBottomAddPageOpen((prev) => !prev)}
+                className={`flex items-center justify-center gap-1 px-2 py-1 rounded-lg font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  isBottomAddPageOpen
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-blue-600/10 text-blue-700 dark:text-blue-300 hover:bg-blue-600 hover:text-white'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>New Page</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Right-edge swipe-triggered scrollbar with live left-side page badge */}
         <DocumentScrollBar
           isVisible={isRightScrollbarVisible}
@@ -3637,6 +3965,8 @@ export default function App() {
           onDismiss={() => setIsRightScrollbarVisible(false)}
         />
       </div>
+        );
+      })()}
 
       {/* 3. THREE-STEP CONFIRMATION CLEAR PAGE MODAL */}
       <ClearPageModal

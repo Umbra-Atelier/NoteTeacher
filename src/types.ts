@@ -198,6 +198,7 @@ export interface PageData {
   id: string;
   title: string;
   template: PaperTemplate;
+  underlayTemplate?: PaperTemplate;
   pdfPageNumber?: number;
   pdfSourceId?: string;
   previewDataUrl?: string;

@@ -12,6 +12,7 @@ interface DictatedTextBoxItemProps {
   isEditing?: boolean;
   isEraserActive?: boolean;
   zoomScale?: number;
+  allowFingerControls?: boolean;
   isReadOnly?: boolean;
   hideChrome?: boolean;
   passThroughBody?: boolean;
@@ -33,6 +34,7 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
   isEditing = false,
   isEraserActive = false,
   zoomScale = 1,
+  allowFingerControls = true,
   isReadOnly = false,
   hideChrome = false,
   passThroughBody = false,
@@ -49,6 +51,7 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const aabbAnchorRef = useRef<HTMLDivElement>(null);
   const isResizingRef = useRef(false);
+  const lastPointerTypeRef = useRef<string>('mouse');
   const lastTouchTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const lastDoubleTriggerRef = useRef<number>(0);
 
@@ -155,27 +158,22 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
       }
     };
 
-    const handleMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const handleTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) {
-        ev.preventDefault();
-        onMove(ev.touches[0].clientX, ev.touches[0].clientY);
-      }
+    const handlePointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      onMove(ev.clientX, ev.clientY);
     };
     const handleEnd = () => {
       if (rafId !== null) cancelAnimationFrame(rafId);
       applyMove();
       setIsDraggingMove(false);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleEnd);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handleEnd);
+      window.removeEventListener('pointercancel', handleEnd);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleEnd);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleEnd);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleEnd);
+    window.addEventListener('pointercancel', handleEnd);
   };
 
   // Proportional L-Grab Resize (strictly preserves aspect ratio & scales fontSize proportionally,
@@ -237,25 +235,20 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
       });
     };
 
-    const handleMouseMove = (ev: MouseEvent) => onMove(ev.clientX, ev.clientY);
-    const handleTouchMove = (ev: TouchEvent) => {
-      if (ev.touches.length > 0) {
-        ev.preventDefault();
-        onMove(ev.touches[0].clientX, ev.touches[0].clientY);
-      }
+    const handlePointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      onMove(ev.clientX, ev.clientY);
     };
     const handleEnd = () => {
       isResizingRef.current = false;
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleTouchMove);
-      window.removeEventListener('touchend', handleEnd);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handleEnd);
+      window.removeEventListener('pointercancel', handleEnd);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleEnd);
-    window.addEventListener('touchmove', handleTouchMove, { passive: false });
-    window.addEventListener('touchend', handleEnd);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
+    window.addEventListener('pointerup', handleEnd);
+    window.addEventListener('pointercancel', handleEnd);
   };
 
   const hasAnyText = Boolean(box.text || box.interimText);
@@ -312,7 +305,9 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
           transformOrigin: 'center center',
         }}
         onPointerDown={(e) => {
+          lastPointerTypeRef.current = e.pointerType;
           if (shouldPassThrough) return;
+          if (e.pointerType === 'touch' && !allowFingerControls) return;
           e.stopPropagation();
           if (isEditing) return;
 
@@ -338,6 +333,7 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
         }}
         onClick={(e) => {
           if (shouldPassThrough) return;
+          if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
           e.stopPropagation();
           if (isEditing) return;
           if (!isDictatingActive && !showTransformBox) {
@@ -346,6 +342,7 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
         }}
         onDoubleClick={(e) => {
           if (shouldPassThrough) return;
+          if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
           e.stopPropagation();
           triggerDoubleClickEdit();
         }}
@@ -456,76 +453,56 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
         <>
           {/* TOP-LEFT L-GRAB */}
           <div
-            onMouseDown={(e) => {
+            onPointerDown={(e) => {
+              if (e.pointerType === 'touch' && !allowFingerControls) return;
+              e.preventDefault();
               e.stopPropagation();
               startCornerResize(-1, -1, e.clientX, e.clientY);
             }}
-            onTouchStart={(e) => {
-              e.stopPropagation();
-              if (e.touches.length === 1) {
-                startCornerResize(-1, -1, e.touches[0].clientX, e.touches[0].clientY);
-              }
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
             title="Drag L-grab to resize (maintains aspect ratio)"
-            className="absolute -top-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nwse-resize hover:scale-125 transition-transform z-50 pointer-events-auto"
+            className="absolute -top-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nwse-resize hover:scale-125 transition-transform z-50 pointer-events-auto touch-none"
           >
             <div className="w-4 h-4 border-t-[3px] border-l-[3px] border-sky-600 rounded-tl bg-white dark:bg-slate-900 shadow-sm" />
           </div>
 
           {/* TOP-RIGHT L-GRAB */}
           <div
-            onMouseDown={(e) => {
+            onPointerDown={(e) => {
+              if (e.pointerType === 'touch' && !allowFingerControls) return;
+              e.preventDefault();
               e.stopPropagation();
               startCornerResize(1, -1, e.clientX, e.clientY);
             }}
-            onTouchStart={(e) => {
-              e.stopPropagation();
-              if (e.touches.length === 1) {
-                startCornerResize(1, -1, e.touches[0].clientX, e.touches[0].clientY);
-              }
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
             title="Drag L-grab to resize (maintains aspect ratio)"
-            className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto"
+            className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto touch-none"
           >
             <div className="w-4 h-4 border-t-[3px] border-r-[3px] border-sky-600 rounded-tr bg-white dark:bg-slate-900 shadow-sm" />
           </div>
 
           {/* BOTTOM-LEFT L-GRAB */}
           <div
-            onMouseDown={(e) => {
+            onPointerDown={(e) => {
+              if (e.pointerType === 'touch' && !allowFingerControls) return;
+              e.preventDefault();
               e.stopPropagation();
               startCornerResize(-1, 1, e.clientX, e.clientY);
             }}
-            onTouchStart={(e) => {
-              e.stopPropagation();
-              if (e.touches.length === 1) {
-                startCornerResize(-1, 1, e.touches[0].clientX, e.touches[0].clientY);
-              }
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
             title="Drag L-grab to resize (maintains aspect ratio)"
-            className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto"
+            className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 pointer-events-auto touch-none"
           >
             <div className="w-4 h-4 border-b-[3px] border-l-[3px] border-sky-600 rounded-bl bg-white dark:bg-slate-900 shadow-sm" />
           </div>
 
           {/* BOTTOM-RIGHT L-GRAB */}
           <div
-            onMouseDown={(e) => {
+            onPointerDown={(e) => {
+              if (e.pointerType === 'touch' && !allowFingerControls) return;
+              e.preventDefault();
               e.stopPropagation();
               startCornerResize(1, 1, e.clientX, e.clientY);
             }}
-            onTouchStart={(e) => {
-              e.stopPropagation();
-              if (e.touches.length === 1) {
-                startCornerResize(1, 1, e.touches[0].clientX, e.touches[0].clientY);
-              }
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
             title="Drag L-grab to resize (maintains aspect ratio)"
-            className="absolute -bottom-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nwse-resize hover:scale-125 transition-transform z-50 pointer-events-auto"
+            className="absolute -bottom-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nwse-resize hover:scale-125 transition-transform z-50 pointer-events-auto touch-none"
           >
             <div className="w-4 h-4 border-b-[3px] border-r-[3px] border-sky-600 rounded-br bg-white dark:bg-slate-900 shadow-sm" />
           </div>
@@ -541,6 +518,7 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
           rotation={box.rotation || 0}
           anchorRef={aabbAnchorRef}
           isOpen={isJoystickOpen}
+          allowFingerControls={allowFingerControls}
           onToggleOpen={() => setIsJoystickOpen((prev) => !prev)}
           onCommitHistory={() => onCommitHistoryRef.current?.()}
           onDraggingChange={setIsDraggingJoystick}
@@ -574,19 +552,14 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
           <div className="flex items-center gap-1.5 flex-wrap bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-1 rounded-xl border border-slate-200 dark:border-slate-700 shadow-xl select-none">
             {/* Compass Grab Handle */}
             <div
-              onMouseDown={(e) => {
+              onPointerDown={(e) => {
+                if (e.pointerType === 'touch' && !allowFingerControls) return;
+                e.preventDefault();
                 e.stopPropagation();
                 startCompassDrag(e.clientX, e.clientY);
               }}
-              onTouchStart={(e) => {
-                e.stopPropagation();
-                if (e.touches.length === 1) {
-                  startCompassDrag(e.touches[0].clientX, e.touches[0].clientY);
-                }
-              }}
-              onPointerDown={(e) => e.stopPropagation()}
               title="Drag Compass to move text box smoothly"
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold shadow-xs cursor-grab active:cursor-grabbing transition-colors ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold shadow-xs cursor-grab active:cursor-grabbing transition-colors touch-none ${
                 isDraggingMove
                   ? 'bg-blue-600 text-white ring-2 ring-blue-300'
                   : 'bg-sky-600 hover:bg-sky-700 text-white'

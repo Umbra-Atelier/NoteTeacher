@@ -1291,25 +1291,9 @@ async function renderPageToCanvas(
   const scaleY = targetHeight / stageHeight;
   const avgScale = (scaleX + scaleY) / 2;
 
-  // 2. Draw Background (PDF Document resolved on demand or Paper Template)
-  const resolvedPdfUrl = page.template === 'pdf' ? await resolvePdfPageDataUrl(page) : undefined;
-  if (page.template === 'pdf' && resolvedPdfUrl) {
-    const img = await loadImageSafe(resolvedPdfUrl);
-    if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
-      const imgAspect = img.naturalWidth / img.naturalHeight;
-      const boxAspect = targetWidth / targetHeight;
-      let drawW = targetWidth;
-      let drawH = targetHeight;
-      if (imgAspect > boxAspect) {
-        drawH = targetWidth / imgAspect;
-      } else {
-        drawW = targetHeight * imgAspect;
-      }
-      const drawX = (targetWidth - drawW) / 2;
-      const drawY = (targetHeight - drawH) / 2;
-      ctx.drawImage(img, drawX, drawY, drawW, drawH);
-    }
-  } else if (page.template === 'lined') {
+  // 2. Draw Paper Template (or Underlay beneath PDF) + PDF Document
+  const paperPattern = page.template === 'pdf' ? page.underlayTemplate || 'blank' : page.template;
+  if (paperPattern === 'lined') {
     const lineHeight = 32 * scaleY;
     ctx.save();
     ctx.strokeStyle = 'rgba(147, 197, 253, 0.35)';
@@ -1328,7 +1312,7 @@ async function renderPageToCanvas(
     ctx.lineTo(96 * scaleX, targetHeight);
     ctx.stroke();
     ctx.restore();
-  } else if (page.template === 'grid' || page.template === 'graph') {
+  } else if (paperPattern === 'grid' || paperPattern === 'graph') {
     const stepX = 24 * scaleX;
     const stepY = 24 * scaleY;
     ctx.save();
@@ -1347,7 +1331,7 @@ async function renderPageToCanvas(
       ctx.stroke();
     }
     ctx.restore();
-  } else if (page.template === 'dotted') {
+  } else if (paperPattern === 'dotted') {
     const stepX = 24 * scaleX;
     const stepY = 24 * scaleY;
     ctx.save();
@@ -1360,6 +1344,30 @@ async function renderPageToCanvas(
       }
     }
     ctx.restore();
+  }
+
+  const resolvedPdfUrl = page.template === 'pdf' ? await resolvePdfPageDataUrl(page) : undefined;
+  if (page.template === 'pdf' && resolvedPdfUrl) {
+    const img = await loadImageSafe(resolvedPdfUrl);
+    if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      const imgAspect = img.naturalWidth / img.naturalHeight;
+      const boxAspect = targetWidth / targetHeight;
+      let drawW = targetWidth;
+      let drawH = targetHeight;
+      if (imgAspect > boxAspect) {
+        drawH = targetWidth / imgAspect;
+      } else {
+        drawW = targetHeight * imgAspect;
+      }
+      const drawX = (targetWidth - drawW) / 2;
+      const drawY = (targetHeight - drawH) / 2;
+      ctx.save();
+      if (paperPattern !== 'blank') {
+        ctx.globalCompositeOperation = 'multiply';
+      }
+      ctx.drawImage(img, drawX, drawY, drawW, drawH);
+      ctx.restore();
+    }
   }
 
   const pageImages = images.filter((img) => img.pageId === page.id);
