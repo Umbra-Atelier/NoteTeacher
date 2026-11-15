@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.5);
+}
+
+/* Desmos container styling fixes & keyboard input stability */
+.dcg-calc-basic-container,
+.dcg-container {
+  font-family: var(--font-sans) !important;
+}
+
+/* Ensure Desmos inputs, mathquill textareas and keypad buttons receive focus without premature blur */
+.desmos-box .desmos-calc-container {
+  touch-action: auto !important;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.dcg-mq-textarea,
+.dcg-mq-textarea *,
+.desmos-calc-container input,
+.desmos-calc-container textarea {
+  touch-action: auto !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.dcg-keypad,
+.dcg-keypad-container,
+.dcg-keypad-btn,
+.dcg-btn-flat,
+.dcg-show-keypad,
+.dcg-minimize-keypad {
+  touch-action: manipulation !important;
+}
+
+/* Stylus drawing canvas touch stability */
+canvas.drawing-layer,
+div.drawing-layer {
+  touch-action: none;
+}
+
+/* Desmos popovers and dropdowns (trig sin/cos/tan, stats, calculus, functions GUI) */
+.desmos-box .dcg-popover-container,
+.desmos-box .dcg-dropdown-container,
+.desmos-box .dcg-modal-container,
+.desmos-box .dcg-tooltip,
+.desmos-box .dcg-popover {
+  z-index: 99999 !important;
+}
+
+/* Desmos see-through transparency & rounded bottom border */
+.desmos-calc-container .dcg-container {
+  background-color: transparent !important;
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
+
+.desmos-calc-container .dcg-graph-outer {
+  background-color: transparent !important;
+}
+
+
+

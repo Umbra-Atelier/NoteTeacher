@@ -1,0 +1,6 @@
+{
+  "name": "NoteTeacher - Stylus & Desmos PDF Canvas",
+  "description": "Modern stylus and iPad PDF editor and whiteboard for teachers featuring Desmos graphing, geometric construction, Microsoft Notepad-inspired UI, ghosted eraser, and live presentation tools.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
