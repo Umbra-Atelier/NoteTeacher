@@ -51,6 +51,8 @@ export type EraserType = 'scrub' | 'select' | 'circle';
 
 export type MagicGrabMode = 'touch' | 'contained' | 'not_contained';
 
+export type AngleNegativeDirection = 'clockwise' | 'counter_clockwise';
+
 export type PaperTemplate = 'blank' | 'lined' | 'grid' | 'graph' | 'dotted' | 'pdf';
 
 export type PresenterMode = 'none' | 'laser' | 'spotlight';
@@ -135,6 +137,7 @@ export interface LiveAnglePreview {
   ray2: number;
   unit: 'deg' | 'rad';
   allowNegativeAngles: boolean;
+  negativeDirection?: AngleNegativeDirection;
 }
 
 export interface LiveDictatePreview {

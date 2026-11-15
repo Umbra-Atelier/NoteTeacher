@@ -68,6 +68,164 @@ export async function buildProjectJsonBlob(
   return new Blob([json], { type: 'application/json' });
 }
 
+export type SaveExecutionResult =
+  | {
+      status: 'saved';
+      fileName: string;
+      fileHandle?: FileSystemFileHandle;
+      mode: SaveAsMode;
+      method: 'handle_overwrite' | 'picker' | 'download';
+    }
+  | { status: 'cancelled' }
+  | {
+      status: 'needs_explorer_fallback';
+      reason: 'blocked_in_iframe' | 'unsupported';
+      mode: SaveAsMode;
+      suggestedName: string;
+    };
+
+export function triggerDirectBlobDownload(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export function canShareFilesOnDevice(): boolean {
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+    return false;
+  }
+  if (typeof navigator.canShare !== 'function') {
+    return false;
+  }
+  try {
+    const probe = new File(['probe'], 'probe.pdf', { type: 'application/pdf' });
+    return navigator.canShare({ files: [probe] });
+  } catch {
+    return false;
+  }
+}
+
+export async function shareFileWithSystemSheet(
+  blob: Blob,
+  fileName: string,
+  mimeType: string
+): Promise<'shared' | 'cancelled' | 'unsupported'> {
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+    return 'unsupported';
+  }
+  try {
+    const file = new File([blob], fileName, { type: mimeType || blob.type || 'application/octet-stream' });
+    if (typeof navigator.canShare === 'function' && !navigator.canShare({ files: [file] })) {
+      return 'unsupported';
+    }
+    await navigator.share({
+      files: [file],
+      title: fileName,
+    });
+    return 'shared';
+  } catch (err: unknown) {
+    if ((err as Error)?.name === 'AbortError') {
+      return 'cancelled';
+    }
+    console.warn('Web Share file failed:', err);
+    return 'unsupported';
+  }
+}
+
+export function getDefaultSaveFileName(
+  mode: SaveAsMode,
+  pages: PageData[],
+  currentPageId?: string,
+  existingName?: string
+): string {
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const cleanBaseFromExisting = existingName
+    ? existingName.replace(/\.(noteteacher|json|pdf|png|jpg|jpeg)$/i, '')
+    : '';
+
+  if (mode === 'project_json') {
+    if (existingName && /\.(noteteacher|json)$/i.test(existingName)) {
+      return existingName;
+    }
+    const base = cleanBaseFromExisting || `NoteTeacher_Project_${dateStr}`;
+    return `${base}.noteteacher`;
+  }
+
+  const isClean = mode === 'pdf_clean' || mode === 'image_clean';
+  const suffix = isClean ? 'Clean' : 'AsShown';
+
+  if (mode === 'image_as_shown' || mode === 'image_clean') {
+    if (existingName && /\.png$/i.test(existingName)) {
+      return existingName;
+    }
+    const currentPage = pages.find((p) => p.id === currentPageId) || pages[0];
+    const pageTitle = (currentPage?.title || 'Page').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const base = cleanBaseFromExisting || `NoteTeacher_${pageTitle}_${suffix}_${dateStr}`;
+    return `${base}.png`;
+  }
+
+  if (existingName && /\.pdf$/i.test(existingName)) {
+    return existingName;
+  }
+  const firstPage = pages[0];
+  const docTitle = (firstPage?.title || 'Worksheet').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const base = cleanBaseFromExisting || `NoteTeacher_${docTitle}_${suffix}_${dateStr}`;
+  return `${base}.pdf`;
+}
+
+export function doesHandleMatchSaveMode(handleName: string, mode: SaveAsMode): boolean {
+  const lower = handleName.toLowerCase();
+  if (mode === 'project_json') {
+    return lower.endsWith('.noteteacher') || lower.endsWith('.json');
+  }
+  if (mode === 'image_as_shown' || mode === 'image_clean') {
+    return lower.endsWith('.png');
+  }
+  return lower.endsWith('.pdf');
+}
+
+function resolveSaveModeFromPickedName(pickedName: string, fallbackMode: SaveAsMode): SaveAsMode {
+  const lower = pickedName.toLowerCase();
+  if (lower.endsWith('.noteteacher') || lower.endsWith('.json')) {
+    return 'project_json';
+  }
+  if (lower.endsWith('.png')) {
+    return fallbackMode === 'pdf_clean' || fallbackMode === 'image_clean'
+      ? 'image_clean'
+      : 'image_as_shown';
+  }
+  if (lower.endsWith('.pdf')) {
+    return fallbackMode === 'pdf_clean' || fallbackMode === 'image_clean'
+      ? 'pdf_clean'
+      : 'pdf_as_shown';
+  }
+  return fallbackMode;
+}
+
+function getSavePickerTypes(mode: SaveAsMode) {
+  const pdfType = {
+    description: 'PDF Document',
+    accept: { 'application/pdf': ['.pdf'] },
+  };
+  const projectType = {
+    description: 'NoteTeacher Project',
+    accept: { 'application/json': ['.noteteacher', '.json'] },
+  };
+  const pngType = {
+    description: 'PNG Image',
+    accept: { 'image/png': ['.png'] },
+  };
+
+  if (mode === 'project_json') return [projectType, pdfType, pngType];
+  if (mode === 'image_as_shown' || mode === 'image_clean') return [pngType, pdfType, projectType];
+  return [pdfType, projectType, pngType];
+}
+
 /**
  * Exports full project as a downloadable .noteteacher JSON file (or overwrites existing local handle)
  */
@@ -81,66 +239,90 @@ export async function exportProjectJson(
   suggestedName?: string,
   existingHandle?: FileSystemFileHandle,
   dictatedTextBoxes: DictatedTextBox[] = []
-) {
-  const blob = await buildProjectJsonBlob(
-    pages,
-    strokes,
-    shapes,
-    graphs,
-    calculators,
-    images,
-    dictatedTextBoxes
-  );
-  const finalFilename =
-    suggestedName || `NoteTeacher_Project_${new Date().toISOString().slice(0, 10)}.noteteacher`;
+): Promise<SaveExecutionResult> {
+  const finalFilename = getDefaultSaveFileName('project_json', pages, undefined, suggestedName);
 
-  // Overwrite directly via existing FileSystemFileHandle if available & permitted
-  if (existingHandle) {
+  // Overwrite directly via existing FileSystemFileHandle if available & matching extension
+  if (existingHandle && doesHandleMatchSaveMode(existingHandle.name, 'project_json')) {
     try {
       // @ts-expect-error requestPermission
       const perm = await existingHandle.requestPermission({ mode: 'readwrite' });
       if (perm === 'granted') {
+        const blob = await buildProjectJsonBlob(
+          pages,
+          strokes,
+          shapes,
+          graphs,
+          calculators,
+          images,
+          dictatedTextBoxes
+        );
         const writable = await existingHandle.createWritable();
         await writable.write(blob);
         await writable.close();
-        return;
+        return {
+          status: 'saved',
+          fileName: existingHandle.name,
+          fileHandle: existingHandle,
+          mode: 'project_json',
+          method: 'handle_overwrite',
+        };
       }
     } catch (err) {
       console.warn('Direct handle overwrite failed, falling back to Save Picker:', err);
     }
   }
 
-  // Try Native File System Access API save picker with suggestedName pre-filled
+  // Open native File Explorer SYNCHRONOUSLY before async blob building to keep user activation
   if (typeof window !== 'undefined' && 'showSaveFilePicker' in window) {
     try {
-      // @ts-expect-error showSaveFilePicker
-      const handle: FileSystemFileHandle = await window.showSaveFilePicker({
+      const pickerOpts: Record<string, unknown> = {
         suggestedName: finalFilename,
-        types: [
-          {
-            description: 'NoteTeacher Project',
-            accept: { 'application/json': ['.noteteacher', '.json'] },
-          },
-        ],
-      });
+        types: getSavePickerTypes('project_json'),
+      };
+      if (existingHandle) {
+        pickerOpts.startIn = existingHandle;
+      }
+      // @ts-expect-error showSaveFilePicker
+      const handle: FileSystemFileHandle = await window.showSaveFilePicker(pickerOpts);
+      const blob = await buildProjectJsonBlob(
+        pages,
+        strokes,
+        shapes,
+        graphs,
+        calculators,
+        images,
+        dictatedTextBoxes
+      );
       const writable = await handle.createWritable();
       await writable.write(blob);
       await writable.close();
-      return;
+      return {
+        status: 'saved',
+        fileName: handle.name,
+        fileHandle: handle,
+        mode: 'project_json',
+        method: 'picker',
+      };
     } catch (err: unknown) {
-      if ((err as Error)?.name === 'AbortError') return;
-      console.warn('showSaveFilePicker failed or was cancelled, falling back to blob download:', err);
+      const errName = (err as Error)?.name;
+      if (errName === 'AbortError') return { status: 'cancelled' };
+      console.warn('showSaveFilePicker failed:', err);
+      return {
+        status: 'needs_explorer_fallback',
+        reason: errName === 'SecurityError' ? 'blocked_in_iframe' : 'unsupported',
+        mode: 'project_json',
+        suggestedName: finalFilename,
+      };
     }
   }
 
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = finalFilename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  return {
+    status: 'needs_explorer_fallback',
+    reason: 'unsupported',
+    mode: 'project_json',
+    suggestedName: finalFilename,
+  };
 }
 
 function loadImageSafe(src: string): Promise<HTMLImageElement | null> {
@@ -1239,8 +1421,9 @@ async function renderPageToCanvas(
 }
 
 /**
- * Captures the document and ALL its pages as a high-resolution PDF, PNG Image, or Project JSON,
- * preserving exact frozen Desmos & Calculator states and dimensions for both As-Shown and Clean modes.
+ * Captures and saves the document as a PDF, PNG Image, or .noteteacher Project.
+ * Opens the system File Explorer (showSaveFilePicker) synchronously on click before rendering,
+ * or reports needs_explorer_fallback so the in-app File Explorer Save modal can open.
  */
 export async function executeSaveAs(
   mode: SaveAsMode,
@@ -1256,106 +1439,101 @@ export async function executeSaveAs(
   suggestedFilename?: string,
   existingHandle?: FileSystemFileHandle,
   dictatedTextBoxes: DictatedTextBox[] = []
-): Promise<void> {
-  if (mode === 'project_json') {
-    await exportProjectJson(
-      pages,
-      strokes,
-      shapes,
-      graphs,
-      calculators,
-      images,
-      suggestedFilename,
-      existingHandle,
-      dictatedTextBoxes
-    );
-    return;
+): Promise<SaveExecutionResult> {
+  const defaultFileName = getDefaultSaveFileName(mode, pages, currentPageId, suggestedFilename);
+
+  // 1. Overwrite directly via existing FileSystemFileHandle if available & type matches
+  if (existingHandle && doesHandleMatchSaveMode(existingHandle.name, mode)) {
+    try {
+      // @ts-expect-error requestPermission
+      const perm = await existingHandle.requestPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        const { blob } = await buildSaveAsBlob(
+          mode,
+          containerElement,
+          graphs,
+          pages,
+          strokes,
+          shapes,
+          calculators,
+          currentPageId,
+          images,
+          existingHandle.name,
+          dictatedTextBoxes
+        );
+        const writable = await existingHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return {
+          status: 'saved',
+          fileName: existingHandle.name,
+          fileHandle: existingHandle,
+          mode,
+          method: 'handle_overwrite',
+        };
+      }
+    } catch (err) {
+      console.warn('Direct handle overwrite failed, falling back to Save Picker:', err);
+    }
   }
 
-  const isClean = mode === 'pdf_clean' || mode === 'image_clean';
-
-  try {
-    // Eagerly freeze all live mounted Desmos & Calculator widgets before compositing pages
-    await captureAllMountedWidgets();
-
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const suffix = isClean ? 'Clean' : 'AsShown';
-
-    if (mode === 'image_as_shown' || mode === 'image_clean') {
-      const currentPage = pages.find((p) => p.id === currentPageId) || pages[0];
-      const canvas = await renderPageToCanvas(
-        currentPage,
+  // 2. Open native OS File Explorer SYNCHRONOUSLY before async rendering so user activation is preserved
+  if (typeof window !== 'undefined' && 'showSaveFilePicker' in window) {
+    try {
+      const pickerOpts: Record<string, unknown> = {
+        suggestedName: defaultFileName,
+        types: getSavePickerTypes(mode),
+      };
+      if (existingHandle) {
+        pickerOpts.startIn = existingHandle;
+      }
+      // @ts-expect-error showSaveFilePicker
+      const handle: FileSystemFileHandle = await window.showSaveFilePicker(pickerOpts);
+      const resolvedMode = resolveSaveModeFromPickedName(handle.name, mode);
+      const { blob } = await buildSaveAsBlob(
+        resolvedMode,
         containerElement,
+        graphs,
+        pages,
         strokes,
         shapes,
-        graphs,
         calculators,
+        currentPageId,
         images,
-        isClean,
+        handle.name,
         dictatedTextBoxes
       );
-      const imgData = canvas.toDataURL('image/png');
-      const a = document.createElement('a');
-      a.href = imgData;
-      a.download = `NoteTeacher_${currentPage.title.replace(/[^a-zA-Z0-9_-]/g, '_')}_${suffix}_${dateStr}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      return;
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return {
+        status: 'saved',
+        fileName: handle.name,
+        fileHandle: handle,
+        mode: resolvedMode,
+        method: 'picker',
+      };
+    } catch (err: unknown) {
+      const errName = (err as Error)?.name;
+      if (errName === 'AbortError') {
+        return { status: 'cancelled' };
+      }
+      console.warn('showSaveFilePicker failed or blocked:', err);
+      return {
+        status: 'needs_explorer_fallback',
+        reason: errName === 'SecurityError' ? 'blocked_in_iframe' : 'unsupported',
+        mode,
+        suggestedName: defaultFileName,
+      };
     }
-
-    // Export as Multi-Page PDF
-    const firstPage = pages[0];
-    const firstCanvas = await renderPageToCanvas(
-      firstPage,
-      containerElement,
-      strokes,
-      shapes,
-      graphs,
-      calculators,
-      images,
-      isClean,
-      dictatedTextBoxes
-    );
-
-    const pdfWidthPt = (firstCanvas.width / 2) * 0.75;
-    const pdfHeightPt = (firstCanvas.height / 2) * 0.75;
-
-    const pdf = new jsPDF({
-      orientation: firstCanvas.width > firstCanvas.height ? 'landscape' : 'portrait',
-      unit: 'pt',
-      format: [pdfWidthPt, pdfHeightPt],
-    });
-
-    const firstImgData = firstCanvas.toDataURL('image/png');
-    pdf.addImage(firstImgData, 'PNG', 0, 0, pdfWidthPt, pdfHeightPt);
-
-    for (let i = 1; i < pages.length; i++) {
-      const page = pages[i];
-      const pageCanvas = await renderPageToCanvas(
-        page,
-        containerElement,
-        strokes,
-        shapes,
-        graphs,
-        calculators,
-        images,
-        isClean,
-        dictatedTextBoxes
-      );
-      const pageW = (pageCanvas.width / 2) * 0.75;
-      const pageH = (pageCanvas.height / 2) * 0.75;
-
-      pdf.addPage([pageW, pageH], pageCanvas.width > pageCanvas.height ? 'landscape' : 'portrait');
-      const pageImgData = pageCanvas.toDataURL('image/png');
-      pdf.addImage(pageImgData, 'PNG', 0, 0, pageW, pageH);
-    }
-
-    const docTitle = (firstPage.title || 'Worksheet').replace(/[^a-zA-Z0-9_-]/g, '_');
-    pdf.save(`NoteTeacher_${docTitle}_${suffix}_${dateStr}.pdf`);
-  } catch (err) {
-    console.error('Error saving PDF/Image:', err);
   }
+
+  return {
+    status: 'needs_explorer_fallback',
+    reason: 'unsupported',
+    mode,
+    suggestedName: defaultFileName,
+  };
 }
 
 /**

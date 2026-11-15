@@ -16,14 +16,37 @@ import {
   Lock,
   Loader2,
   FolderPlus,
+  Save,
+  Download,
+  Info,
+  Share2,
 } from 'lucide-react';
-import { ExplorerFileItem, ExplorerFolderTab } from '../../types';
+import { ExplorerFileItem, ExplorerFolderTab, SaveAsMode } from '../../types';
 import {
   extractFileExtension,
   formatFileDate,
   formatFileSize,
   isSupportedExplorerExtension,
 } from '../../utils/fileExplorerStorage';
+
+const SAVE_FORMAT_OPTIONS: Array<{ mode: SaveAsMode; label: string; ext: string }> = [
+  { mode: 'pdf_as_shown', label: 'PDF Document (As Shown)', ext: '.pdf' },
+  { mode: 'pdf_clean', label: 'PDF Document (Clean)', ext: '.pdf' },
+  { mode: 'image_as_shown', label: 'PNG Image (As Shown)', ext: '.png' },
+  { mode: 'image_clean', label: 'PNG Image (Clean)', ext: '.png' },
+  { mode: 'project_json', label: 'NoteTeacher Project (.noteteacher)', ext: '.noteteacher' },
+];
+
+function applyExtensionForSaveMode(name: string, saveMode: SaveAsMode): string {
+  const trimmed = name.trim() || 'NoteTeacher_Document';
+  const base = trimmed.replace(/\.(noteteacher|json|pdf|png|jpg|jpeg)$/i, '');
+  const targetExt =
+    SAVE_FORMAT_OPTIONS.find((opt) => opt.mode === saveMode)?.ext || '.pdf';
+  if (saveMode === 'project_json' && /\.json$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${base}${targetExt}`;
+}
 
 interface ClassicFileExplorerModalProps {
   isOpen: boolean;
@@ -39,6 +62,19 @@ interface ClassicFileExplorerModalProps {
     files: ExplorerFileItem[];
   }) => void;
   onRefreshExplorer: () => void;
+  modalMode?: 'open' | 'save';
+  initialSaveMode?: SaveAsMode;
+  suggestedSaveName?: string;
+  saveNotice?: string | null;
+  onSaveToDirectory?: (
+    dirHandle: FileSystemDirectoryHandle,
+    fileName: string,
+    saveMode: SaveAsMode,
+    pathBreadcrumb: string
+  ) => Promise<void>;
+  onDownloadFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
+  onShareFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
+  onAddLocalFolder?: () => Promise<ExplorerFolderTab | null>;
 }
 
 interface TreeSubfolderNode {
@@ -59,6 +95,14 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
   onOpenFile,
   onPinSubfolderTab,
   onRefreshExplorer,
+  modalMode = 'open',
+  initialSaveMode = 'pdf_as_shown',
+  suggestedSaveName,
+  saveNotice,
+  onSaveToDirectory,
+  onDownloadFallback,
+  onShareFallback,
+  onAddLocalFolder,
 }) => {
   const [selectedNodeId, setSelectedNodeId] = useState<string>('');
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
@@ -71,6 +115,15 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
   const [nodeById, setNodeById] = useState<Record<string, TreeSubfolderNode>>({});
   const [loadingNodeIds, setLoadingNodeIds] = useState<Record<string, boolean>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [isSavePanelExpanded, setIsSavePanelExpanded] = useState(modalMode === 'save');
+  const [selectedSaveMode, setSelectedSaveMode] = useState<SaveAsMode>(initialSaveMode);
+  const [saveFileName, setSaveFileName] = useState<string>(
+    applyExtensionForSaveMode(
+      suggestedSaveName || `NoteTeacher_${new Date().toISOString().slice(0, 10)}`,
+      initialSaveMode
+    )
+  );
+  const [isSavingCopy, setIsSavingCopy] = useState(false);
 
   const loadChildrenForTab = async (tab: ExplorerFolderTab) => {
     if (tab.accessState && tab.accessState !== 'granted') return;
@@ -272,6 +325,15 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
 
   useEffect(() => {
     if (!isOpen) return;
+    setIsSavePanelExpanded(modalMode === 'save');
+    setSelectedSaveMode(initialSaveMode);
+    setSaveFileName(
+      applyExtensionForSaveMode(
+        suggestedSaveName || `NoteTeacher_${new Date().toISOString().slice(0, 10)}`,
+        initialSaveMode
+      )
+    );
+    setIsSavingCopy(false);
     const preferred =
       activeTabId && activeTabId !== 'home' && folderTabs.some((t) => t.id === activeTabId)
         ? activeTabId
@@ -293,7 +355,7 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
     if (preferred) {
       setExpandedNodes((prev) => ({ ...prev, [preferred]: true }));
     }
-  }, [isOpen, activeTabId, folderTabs]);
+  }, [isOpen, activeTabId, folderTabs, modalMode, initialSaveMode, suggestedSaveName]);
 
   const currentTab = folderTabs.find((t) => t.id === selectedNodeId);
   const currentSubfolder = nodeById[selectedNodeId];
@@ -304,6 +366,10 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
   const activeBreadcrumb = currentSubfolder
     ? currentSubfolder.pathBreadcrumb
     : currentTab?.pathBreadcrumb || '';
+
+  const activeWritableDirHandle: FileSystemDirectoryHandle | undefined = !isCurrentFolderLocked
+    ? currentSubfolder?.dirHandle || (!currentTab?.isSingleFileTab ? currentTab?.dirHandle : undefined)
+    : undefined;
 
   const folderFiles = useMemo(() => {
     if (isCurrentFolderLocked) return [];
@@ -435,6 +501,74 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
     }
   };
 
+  const handleSaveCopyHere = async () => {
+    if (!onSaveToDirectory || !activeWritableDirHandle) return;
+    const targetName = applyExtensionForSaveMode(saveFileName, selectedSaveMode);
+    setSaveFileName(targetName);
+    setIsSavingCopy(true);
+    setLoadError(null);
+    try {
+      await onSaveToDirectory(
+        activeWritableDirHandle,
+        targetName,
+        selectedSaveMode,
+        `${activeBreadcrumb}/${targetName}`
+      );
+      if (currentTab) void loadChildrenForTab(currentTab);
+      else if (currentSubfolder) void loadChildrenForSubfolder(currentSubfolder);
+      onClose();
+    } catch (err) {
+      setLoadError(
+        err instanceof Error ? err.message : 'Unable to save copy into the selected folder.'
+      );
+    } finally {
+      setIsSavingCopy(false);
+    }
+  };
+
+  const handleDownloadToDevice = async () => {
+    if (!onDownloadFallback) return;
+    const targetName = applyExtensionForSaveMode(saveFileName, selectedSaveMode);
+    setSaveFileName(targetName);
+    setIsSavingCopy(true);
+    setLoadError(null);
+    try {
+      await onDownloadFallback(targetName, selectedSaveMode);
+      onClose();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Unable to save file to device.');
+    } finally {
+      setIsSavingCopy(false);
+    }
+  };
+
+  const handleShareToFiles = async () => {
+    if (!onShareFallback) return;
+    const targetName = applyExtensionForSaveMode(saveFileName, selectedSaveMode);
+    setSaveFileName(targetName);
+    setIsSavingCopy(true);
+    setLoadError(null);
+    try {
+      await onShareFallback(targetName, selectedSaveMode);
+      onClose();
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Unable to open device Share / Save to Files sheet.');
+    } finally {
+      setIsSavingCopy(false);
+    }
+  };
+
+  const handleAddFolderFromModal = async () => {
+    if (!onAddLocalFolder) return;
+    setLoadError(null);
+    const added = await onAddLocalFolder();
+    if (added) {
+      setSelectedNodeId(added.id);
+      setExpandedNodes((prev) => ({ ...prev, [added.id]: true }));
+      void loadChildrenForTab(added);
+    }
+  };
+
   return createPortal(
     <div
       onClick={onClose}
@@ -448,15 +582,27 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
         <div className="flex flex-col border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 shrink-0">
           <div className="flex items-center justify-between px-4 py-3">
             <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-blue-600 text-white flex items-center justify-center shadow-xs">
-                <FolderOpen className="w-4 h-4" />
+              <div
+                className={`w-8 h-8 rounded-lg text-white flex items-center justify-center shadow-xs ${
+                  modalMode === 'save' ? 'bg-emerald-600' : 'bg-blue-600'
+                }`}
+              >
+                {modalMode === 'save' ? (
+                  <Save className="w-4 h-4" />
+                ) : (
+                  <FolderOpen className="w-4 h-4" />
+                )}
               </div>
               <div>
                 <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-                  NoteTeacher Folder Tree Explorer
+                  {modalMode === 'save'
+                    ? 'Save Document — NoteTeacher File Explorer'
+                    : 'NoteTeacher Folder Tree Explorer'}
                 </h2>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Browse subfolders and documents inside your added local tabs
+                  {modalMode === 'save'
+                    ? 'Choose a folder to save a copy directly, or download directly to your device'
+                    : 'Browse subfolders and documents inside your added local tabs'}
                 </p>
               </div>
             </div>
@@ -619,6 +765,13 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
 
           {/* RIGHT FILE GRID / LIST */}
           <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-slate-900 p-4 overflow-y-auto space-y-3">
+            {saveNotice && (
+              <div className="p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-900 flex items-start gap-2 text-xs text-blue-800 dark:text-blue-200">
+                <Info className="w-4 h-4 shrink-0 mt-0.5 text-blue-600 dark:text-blue-400" />
+                <span>{saveNotice}</span>
+              </div>
+            )}
+
             {loadError && (
               <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-xs text-rose-700 dark:text-rose-300">
                 {loadError}
@@ -626,14 +779,26 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
             )}
 
             {folderTabs.length === 0 ? (
-              <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-2 text-slate-400">
+              <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-3 text-slate-400">
                 <FolderOpen className="w-10 h-10 text-slate-300 dark:text-slate-700" />
                 <div className="text-sm font-bold text-slate-700 dark:text-slate-300">
                   No folders or files added yet
                 </div>
                 <p className="text-xs max-w-sm">
-                  Close this explorer and use Home &rarr; Add Folder or Add File to pin local folders and documents as tabs.
+                  {modalMode === 'save'
+                    ? 'Use "Download to Device" below to save immediately to your Downloads folder, or add a local folder to save directly inside NoteTeacher.'
+                    : 'Close this explorer and use Home → Add Folder or Add File to pin local folders and documents as tabs.'}
                 </p>
+                {onAddLocalFolder && (
+                  <button
+                    type="button"
+                    onClick={() => void handleAddFolderFromModal()}
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-xl transition-colors shadow-xs"
+                  >
+                    <FolderPlus className="w-3.5 h-3.5" />
+                    <span>Add Local Folder</span>
+                  </button>
+                )}
               </div>
             ) : isCurrentFolderLocked ? (
               <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-3">
@@ -825,10 +990,66 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
           </div>
         </div>
 
-        {/* 3. BOTTOM FOOTER */}
-        <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 shrink-0">
-          <div className="flex items-center gap-2 min-w-0 pr-4">
-            {selectedFile ? (
+        {/* 3. SAVE COPY BAR & BOTTOM FOOTER */}
+        {(isSavePanelExpanded || modalMode === 'save') && (onSaveToDirectory || onDownloadFallback) && (
+          <div className="px-4 py-2.5 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 flex-1 min-w-0">
+              <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                File name:
+              </label>
+              <input
+                type="text"
+                data-testid="save-explorer-filename-input"
+                value={saveFileName}
+                onChange={(e) => setSaveFileName(e.target.value)}
+                className="flex-1 min-w-0 px-2.5 py-1 text-xs font-mono bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                Format:
+              </label>
+              <select
+                value={selectedSaveMode}
+                onChange={(e) => {
+                  const nextMode = e.target.value as SaveAsMode;
+                  setSelectedSaveMode(nextMode);
+                  setSaveFileName((prev) => applyExtensionForSaveMode(prev, nextMode));
+                }}
+                className="px-2.5 py-1 text-xs font-medium bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                {SAVE_FORMAT_OPTIONS.map((opt) => (
+                  <option key={opt.mode} value={opt.mode}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 gap-3 flex-wrap shrink-0">
+          <div className="flex items-center gap-2 min-w-0 pr-2">
+            {modalMode === 'save' ? (
+              <div className="flex items-center gap-2 flex-wrap">
+                {onAddLocalFolder && (
+                  <button
+                    type="button"
+                    onClick={() => void handleAddFolderFromModal()}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl transition-colors"
+                  >
+                    <FolderPlus className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Add Folder</span>
+                  </button>
+                )}
+                {activeBreadcrumb && !activeWritableDirHandle && folderTabs.length > 0 && (
+                  <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                    Read-only folder selected — use Download to Device or add a writable folder.
+                  </span>
+                )}
+              </div>
+            ) : selectedFile ? (
               <div className="flex items-center gap-2 text-xs">
                 <span className="text-slate-400 font-medium">Selected:</span>
                 <span className="font-bold text-slate-900 dark:text-slate-100 truncate max-w-xs sm:max-w-md">
@@ -845,7 +1066,7 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
             )}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
             <button
               type="button"
               onClick={onClose}
@@ -853,15 +1074,86 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
             >
               Cancel
             </button>
-            <button
-              type="button"
-              disabled={!selectedFile || Boolean(selectedFile.isMissing)}
-              onClick={handleConfirmOpen}
-              className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 dark:disabled:bg-slate-800 text-white rounded-xl shadow-xs transition-all disabled:opacity-50"
-            >
-              <Check className="w-3.5 h-3.5" />
-              <span>Open in NoteTeacher</span>
-            </button>
+
+            {onSaveToDirectory && activeWritableDirHandle && modalMode === 'open' && !isSavePanelExpanded && (
+              <button
+                type="button"
+                onClick={() => setIsSavePanelExpanded(true)}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 rounded-xl transition-colors"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save Copy Here</span>
+              </button>
+            )}
+
+            {onShareFallback && (modalMode === 'save' || isSavePanelExpanded) && (
+              <button
+                type="button"
+                disabled={isSavingCopy}
+                onClick={() => void handleShareToFiles()}
+                data-testid="save-explorer-share-btn"
+                title="Open your device Share / Save to Files sheet to choose a specific folder (iCloud, Files, Drive, OneDrive)"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl shadow-xs transition-all"
+              >
+                {isSavingCopy ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Share2 className="w-3.5 h-3.5" />
+                )}
+                <span>Save to Files / Share...</span>
+              </button>
+            )}
+
+            {onDownloadFallback && (modalMode === 'save' || isSavePanelExpanded) && (
+              <button
+                type="button"
+                disabled={isSavingCopy}
+                onClick={() => void handleDownloadToDevice()}
+                data-testid="save-explorer-download-btn"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl shadow-xs transition-all"
+              >
+                {isSavingCopy ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                <span>Download to Downloads</span>
+              </button>
+            )}
+
+            {onSaveToDirectory && (modalMode === 'save' || isSavePanelExpanded) && (
+              <button
+                type="button"
+                disabled={!activeWritableDirHandle || isSavingCopy}
+                onClick={() => void handleSaveCopyHere()}
+                data-testid="save-copy-here-btn"
+                title={
+                  activeWritableDirHandle
+                    ? `Save copy into ${activeBreadcrumb}`
+                    : 'Select an unlocked local folder in the tree to save directly into it'
+                }
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 dark:disabled:bg-slate-800 text-white rounded-xl shadow-xs transition-all disabled:opacity-50"
+              >
+                {isSavingCopy ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Save className="w-3.5 h-3.5" />
+                )}
+                <span>Save Copy Here</span>
+              </button>
+            )}
+
+            {modalMode === 'open' && (
+              <button
+                type="button"
+                disabled={!selectedFile || Boolean(selectedFile.isMissing)}
+                onClick={handleConfirmOpen}
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 dark:disabled:bg-slate-800 text-white rounded-xl shadow-xs transition-all disabled:opacity-50"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Open in NoteTeacher</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -54,8 +54,13 @@ import {
   MoveVertical,
   BoxSelect,
   Type,
+  Maximize2,
+  Minimize2,
+  MicOff,
+  CheckCircle2,
 } from 'lucide-react';
 import {
+  AngleNegativeDirection,
   AppMode,
   DictateSubMode,
   PenType,
@@ -72,6 +77,7 @@ import {
   ExplorerFileItem,
   ActiveFileContext,
 } from '../types';
+import { MicPermissionState } from '../utils/speechDictation';
 import { hsvToHex, hexToHsv, hexWithAlphaPercent } from '../utils/colorUtils';
 import { captureAllMountedWidgets } from '../utils/widgetSnapshotCache';
 import { FileExplorerView } from './explorer/FileExplorerView';
@@ -115,8 +121,8 @@ interface TopBarRibbonProps {
   // Geometric angle settings props
   angleUnit?: 'deg' | 'rad';
   onSetAngleUnit?: (u: 'deg' | 'rad') => void;
-  angleRayOrder?: 'top_first' | 'bottom_first';
-  onSetAngleRayOrder?: (o: 'top_first' | 'bottom_first') => void;
+  angleNegativeDirection?: AngleNegativeDirection;
+  onSetAngleNegativeDirection?: (d: AngleNegativeDirection) => void;
   allowNegativeAngles?: boolean;
   onSetAllowNegativeAngles?: (a: boolean) => void;
 
@@ -191,14 +197,27 @@ interface TopBarRibbonProps {
   onSetDictateSubMode?: (subMode: DictateSubMode) => void;
   constantDictateFontSize?: number;
   onSetConstantDictateFontSize?: (size: number) => void;
+  micPermission?: MicPermissionState;
+  isRequestingMicPermission?: boolean;
+  onRequestMicPermission?: () => void;
 
-  // Theme
+  // Theme & Fullscreen
   isDarkMode: boolean;
   onToggleTheme: () => void;
+  onStatusNotice?: (kind: 'info' | 'success' | 'error', message: string) => void;
 
   // File Explorer integration
   onOpenFileFromExplorer?: (file: ExplorerFileItem, rawFile?: File) => void;
   activeFileContext?: ActiveFileContext | null;
+  onOpenSaveExplorer?: (mode: SaveAsMode) => void;
+  onSaveToDirectory?: (
+    dirHandle: FileSystemDirectoryHandle,
+    fileName: string,
+    saveMode: SaveAsMode,
+    pathBreadcrumb: string
+  ) => Promise<void>;
+  onDownloadFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
+  onShareFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
 }
 
 export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
@@ -229,8 +248,8 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   onUpdateStylusConfig,
   angleUnit = 'deg',
   onSetAngleUnit,
-  angleRayOrder = 'top_first',
-  onSetAngleRayOrder,
+  angleNegativeDirection = 'counter_clockwise',
+  onSetAngleNegativeDirection,
   allowNegativeAngles = false,
   onSetAllowNegativeAngles,
   onAddCalculatorAtCenter,
@@ -287,11 +306,75 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   onSetDictateSubMode,
   constantDictateFontSize = 24,
   onSetConstantDictateFontSize,
+  micPermission = 'unknown',
+  isRequestingMicPermission = false,
+  onRequestMicPermission,
   isDarkMode,
   onToggleTheme,
+  onStatusNotice,
   onOpenFileFromExplorer,
   activeFileContext,
+  onOpenSaveExplorer,
+  onSaveToDirectory,
+  onDownloadFallback,
+  onShareFallback,
 }) => {
+  // Fullscreen toggle state synced with browser fullscreen events (standard + WebKit Safari)
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(() => {
+    if (typeof document === 'undefined') return false;
+    const doc = document as Document & { webkitFullscreenElement?: Element | null };
+    return Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+  });
+
+  useEffect(() => {
+    const syncFs = () => {
+      const doc = document as Document & { webkitFullscreenElement?: Element | null };
+      setIsFullscreen(Boolean(doc.fullscreenElement || doc.webkitFullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', syncFs);
+    document.addEventListener('webkitfullscreenchange', syncFs);
+    return () => {
+      document.removeEventListener('fullscreenchange', syncFs);
+      document.removeEventListener('webkitfullscreenchange', syncFs);
+    };
+  }, []);
+
+  const handleToggleFullscreen = async () => {
+    if (typeof document === 'undefined') return;
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    const el = document.documentElement as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void> | void;
+    };
+    const activeFs = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+    try {
+      if (activeFs) {
+        if (typeof doc.exitFullscreen === 'function') {
+          await doc.exitFullscreen();
+        } else if (typeof doc.webkitExitFullscreen === 'function') {
+          await doc.webkitExitFullscreen();
+        }
+      } else {
+        if (typeof el.requestFullscreen === 'function') {
+          await el.requestFullscreen();
+        } else if (typeof el.webkitRequestFullscreen === 'function') {
+          await el.webkitRequestFullscreen();
+        } else {
+          onStatusNotice?.(
+            'info',
+            'Fullscreen mode is not supported by this browser viewport.'
+          );
+        }
+      }
+    } catch {
+      onStatusNotice?.(
+        'info',
+        'Fullscreen mode could not be activated in this browser window.'
+      );
+    }
+  };
   // Dual-tab File Modal state: 'export' (Current saving/export flow) vs 'explorer' (Files explorer view)
   const [fileMenuTab, setFileMenuTab] = useState<'export' | 'explorer'>('export');
   // Rainbow HSB/HSV state (default brightness 100 for palette color rainbow bar)
@@ -1295,16 +1378,22 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
               )}
             </div>
 
-            {/* Quick PDF Export */}
+            {/* Quick Save */}
             <button
               type="button"
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => onSaveAs('pdf_as_shown')}
-              title="Quick Save as PDF (As Shown)"
+              onClick={() => {
+                const ext = activeFileContext?.extension?.toLowerCase();
+                const quickMode: SaveAsMode =
+                  ext === '.noteteacher' || ext === '.json' ? 'project_json' : 'pdf_as_shown';
+                onSaveAs(quickMode);
+              }}
+              data-testid="top-save-btn"
+              title="Save Document (Opens File Explorer)"
               className="dcg-do-not-blur flex items-center gap-1 px-3 py-1 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors whitespace-nowrap shrink-0"
             >
-              <FileDown className="w-3.5 h-3.5 shrink-0" />
-              <span>Export PDF</span>
+              <Save className="w-3.5 h-3.5 shrink-0" />
+              <span>Save</span>
             </button>
 
             {/* Theme Toggle */}
@@ -1315,6 +1404,22 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
               className="p-1.5 rounded-lg text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
             >
               {isDarkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
+            </button>
+
+            {/* Top-Right Fullscreen Toggle */}
+            <button
+              type="button"
+              onClick={() => void handleToggleFullscreen()}
+              title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+              aria-label={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+              data-testid="fullscreen-toggle-btn"
+              className={`p-1.5 rounded-lg transition-colors shrink-0 ${
+                isFullscreen
+                  ? 'bg-blue-50 text-blue-600 dark:bg-blue-950/60 dark:text-blue-400 ring-1 ring-blue-300 dark:ring-blue-700'
+                  : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </button>
           </div>
         </div>
@@ -1524,13 +1629,28 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   {/* RIGHT COLUMN: SAVE & EXPORT OPTIONS */}
                   <div className="flex-1 p-5 flex flex-col justify-between overflow-y-auto">
                     <div>
-                      <div className="pb-3 border-b border-slate-100 dark:border-slate-800">
-                        <h3 className="font-bold text-base text-slate-900 dark:text-slate-100">
-                          Save &amp; Export Document
-                        </h3>
-                        <p className="text-xs text-slate-500">
-                          Export complete worksheets, rendered PDFs, or save projects to disk
-                        </p>
+                      <div className="pb-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+                        <div>
+                          <h3 className="font-bold text-base text-slate-900 dark:text-slate-100">
+                            Save Document
+                          </h3>
+                          <p className="text-xs text-slate-500">
+                            Save complete worksheets, rendered PDFs, images, or project files via File Explorer
+                          </p>
+                        </div>
+                        {onOpenSaveExplorer && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowFileModal(false);
+                              onOpenSaveExplorer('pdf_as_shown');
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold transition-colors shrink-0"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            <span>Save to Explorer Folder...</span>
+                          </button>
+                        )}
                       </div>
 
                       {/* Save As Cards Grid */}
@@ -1687,6 +1807,9 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                     }}
                     onCloseModal={() => setShowFileModal(false)}
                     activeFileContext={activeFileContext}
+                    onSaveToDirectory={onSaveToDirectory}
+                    onDownloadFallback={onDownloadFallback}
+                    onShareFallback={onShareFallback}
                   />
                 </div>
               )}
@@ -2257,19 +2380,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1 pl-2 border-l border-amber-300 dark:border-amber-700">
-                      <span className="text-xs text-amber-800 dark:text-amber-200 font-medium">Order:</span>
-                      <button
-                        type="button"
-                        onClick={() => onSetAngleRayOrder?.(angleRayOrder === 'top_first' ? 'bottom_first' : 'top_first')}
-                        title="Toggle Ray positioning order"
-                        className="px-2 py-0.5 rounded text-xs font-semibold bg-amber-100 dark:bg-amber-900/60 text-amber-900 dark:text-amber-100 hover:bg-amber-200 flex items-center gap-1"
-                      >
-                        <span>{angleRayOrder === 'top_first' ? 'Top Ray First' : 'Bottom Ray First'}</span>
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-1 pl-2 border-l border-amber-300 dark:border-amber-700">
-                      <label className="flex items-center gap-1.5 cursor-pointer text-xs font-medium text-amber-900 dark:text-amber-200">
+                      <label className="flex items-center gap-1.5 cursor-pointer text-xs font-medium text-amber-900 dark:text-amber-200 whitespace-nowrap">
                         <input
                           type="checkbox"
                           checked={allowNegativeAngles}
@@ -2279,6 +2390,40 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                         <span>Allow Negative</span>
                       </label>
                     </div>
+
+                    {allowNegativeAngles && (
+                      <div className="flex items-center gap-1 pl-2 border-l border-amber-300 dark:border-amber-700">
+                        <span className="text-xs text-amber-800 dark:text-amber-200 font-medium whitespace-nowrap">
+                          Negative Direction:
+                        </span>
+                        <div className="flex items-center gap-0.5 bg-amber-100/80 dark:bg-amber-900/50 p-0.5 rounded">
+                          <button
+                            type="button"
+                            onClick={() => onSetAngleNegativeDirection?.('counter_clockwise')}
+                            title="Angle becomes negative when dragging Ray 2 counter-clockwise past Ray 1"
+                            className={`px-2 py-0.5 rounded text-xs font-semibold transition-colors whitespace-nowrap ${
+                              angleNegativeDirection === 'counter_clockwise'
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'text-amber-800 dark:text-amber-200 hover:bg-amber-200/70'
+                            }`}
+                          >
+                            ↺ Counter-Clockwise
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onSetAngleNegativeDirection?.('clockwise')}
+                            title="Angle becomes negative when dragging Ray 2 clockwise past Ray 1"
+                            className={`px-2 py-0.5 rounded text-xs font-semibold transition-colors whitespace-nowrap ${
+                              angleNegativeDirection === 'clockwise'
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'text-amber-800 dark:text-amber-200 hover:bg-amber-200/70'
+                            }`}
+                          >
+                            ↻ Clockwise
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
 
@@ -2488,6 +2633,43 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                     className="w-14 px-1.5 py-0.5 rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-center font-mono font-semibold text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-sky-500"
                   />
                   <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">px</span>
+                </div>
+
+                {/* Cross-Platform Microphone Permission Control (Apple iOS/iPadOS/macOS, Windows, Android) */}
+                <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200 dark:border-slate-800">
+                  {micPermission === 'granted' ? (
+                    <span className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-semibold whitespace-nowrap">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>Mic Ready</span>
+                    </span>
+                  ) : micPermission === 'denied' ? (
+                    <button
+                      type="button"
+                      disabled={isRequestingMicPermission}
+                      onClick={() => onRequestMicPermission?.()}
+                      title="Microphone access is blocked — click to request again or view device settings instructions"
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-100 dark:hover:bg-rose-900/60 border border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-200 text-xs font-semibold transition-colors whitespace-nowrap"
+                    >
+                      <MicOff className="w-3.5 h-3.5 shrink-0" />
+                      <span>{isRequestingMicPermission ? 'Requesting...' : 'Mic Blocked · Allow'}</span>
+                    </button>
+                  ) : micPermission === 'unsupported' ? (
+                    <span className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300 text-xs font-medium whitespace-nowrap">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>HTTPS Required for Mic</span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={isRequestingMicPermission}
+                      onClick={() => onRequestMicPermission?.()}
+                      title="Ask for Microphone Permission (Apple, Windows & Android)"
+                      className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-xs transition-colors whitespace-nowrap"
+                    >
+                      <Mic className="w-3.5 h-3.5 shrink-0" />
+                      <span>{isRequestingMicPermission ? 'Requesting Mic...' : 'Allow Mic'}</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">

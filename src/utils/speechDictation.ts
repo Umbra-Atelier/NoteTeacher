@@ -42,13 +42,71 @@ interface SpeechRecognitionInstance extends EventTarget {
 
 type SpeechRecognitionCtor = new () => SpeechRecognitionInstance;
 
-function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
+export type MicPermissionState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'unsupported';
+export type DevicePlatform = 'apple' | 'android' | 'windows' | 'other';
+
+export function detectDevicePlatform(): DevicePlatform {
+  if (typeof navigator === 'undefined') return 'other';
+  const ua = navigator.userAgent || '';
+  const platform = (navigator as Navigator & { platform?: string }).platform || '';
+  const maxTouch = navigator.maxTouchPoints || 0;
+  // Detect iPhone, iPad, iPod, macOS, and iPadOS reporting MacIntel with touch points
+  if (/iPad|iPhone|iPod|Macintosh|Mac OS X/i.test(ua) || (platform === 'MacIntel' && maxTouch > 1)) {
+    return 'apple';
+  }
+  if (/Android/i.test(ua)) {
+    return 'android';
+  }
+  if (/Windows|Win32|Win64/i.test(ua) || /Win/i.test(platform)) {
+    return 'windows';
+  }
+  return 'other';
+}
+
+export function getDeniedPermissionHelpMessage(platform: DevicePlatform): string {
+  switch (platform) {
+    case 'apple':
+      return 'Microphone access is blocked. On iPad/iPhone/Mac, tap the "AA" or lock icon in Safari’s address bar (or Settings → Safari/Browser → Microphone) and set Microphone to Allow.';
+    case 'android':
+      return 'Microphone access is blocked. Tap the lock/tune icon in your browser’s address bar → Permissions → Allow Microphone (and check Android Settings → Apps → Browser → Permissions).';
+    case 'windows':
+      return 'Microphone access is blocked. Click the lock/mic icon in the browser address bar to allow Microphone, and verify Windows Settings → Privacy & security → Microphone is enabled.';
+    default:
+      return 'Microphone permission was denied. Please allow microphone access in your browser site settings to dictate.';
+  }
+}
+
+export function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
   if (typeof window === 'undefined') return null;
   const w = window as unknown as {
     SpeechRecognition?: SpeechRecognitionCtor;
     webkitSpeechRecognition?: SpeechRecognitionCtor;
   };
   return w.SpeechRecognition || w.webkitSpeechRecognition || null;
+}
+
+function getPreferredAudioMimeType(): string {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4;codecs=mp4a.40.2',
+    'audio/mp4',
+    'audio/aac',
+    'audio/ogg;codecs=opus',
+  ];
+  for (const mime of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported(mime)) {
+        return mime;
+      }
+    } catch {
+      // Ignore probe error
+    }
+  }
+  return '';
 }
 
 function joinTranscriptParts(base: string, addition: string): string {
@@ -73,6 +131,18 @@ export function useSpeechDictation({
 }: UseSpeechDictationOptions) {
   const [isListening, setIsListening] = useState(false);
   const [activeTargetBoxId, setActiveTargetBoxId] = useState<string | null>(null);
+  const [micPermission, setMicPermission] = useState<MicPermissionState>(() => {
+    if (typeof window === 'undefined') return 'unknown';
+    const hasGetUserMedia = Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    const hasSpeech = Boolean(getSpeechRecognitionCtor());
+    if (!hasGetUserMedia && !hasSpeech) return 'unsupported';
+    return 'prompt';
+  });
+  const [isRequestingPermission, setIsRequestingPermission] = useState(false);
+
+  const micPermissionRef = useRef<MicPermissionState>(micPermission);
+  micPermissionRef.current = micPermission;
+  const platformRef = useRef<DevicePlatform>(detectDevicePlatform());
 
   const shouldListenRef = useRef(false);
   const targetBoxIdRef = useRef<string | null>(null);
@@ -93,6 +163,137 @@ export function useSpeechDictation({
   onTranscriptUpdateRef.current = onTranscriptUpdate;
   const onStatusErrorRef = useRef(onStatusError);
   onStatusErrorRef.current = onStatusError;
+
+  // Probe existing microphone permission status safely across Apple Safari, Windows, and Android
+  const refreshMicPermission = useCallback(async (): Promise<MicPermissionState> => {
+    if (typeof window === 'undefined') return 'unknown';
+    const hasGetUserMedia = Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    const hasSpeech = Boolean(getSpeechRecognitionCtor());
+
+    if (!window.isSecureContext && !hasSpeech && !hasGetUserMedia) {
+      setMicPermission('unsupported');
+      return 'unsupported';
+    }
+
+    // 1. Standard Permissions API (Windows Chrome/Edge/Firefox & Android Chrome)
+    if (navigator.permissions && typeof navigator.permissions.query === 'function') {
+      try {
+        const status = await navigator.permissions.query({
+          name: 'microphone' as PermissionName,
+        });
+        const mapped: MicPermissionState =
+          status.state === 'granted'
+            ? 'granted'
+            : status.state === 'denied'
+            ? 'denied'
+            : 'prompt';
+        setMicPermission(mapped);
+        status.onchange = () => {
+          const nextState: MicPermissionState =
+            status.state === 'granted'
+              ? 'granted'
+              : status.state === 'denied'
+              ? 'denied'
+              : 'prompt';
+          setMicPermission(nextState);
+        };
+        return mapped;
+      } catch {
+        // Safari/iOS throws on permissions.query({ name: 'microphone' }) — fall through to enumerateDevices
+      }
+    }
+
+    // 2. Safari / Apple fallback probe: if audioinput devices already expose non-empty labels, permission is granted
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function') {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter((d) => d.kind === 'audioinput');
+        if (audioInputs.some((d) => Boolean(d.label && d.label.trim().length > 0))) {
+          setMicPermission('granted');
+          return 'granted';
+        }
+      } catch {
+        // Ignore probe errors
+      }
+    }
+
+    if (!hasGetUserMedia && !hasSpeech) {
+      setMicPermission('unsupported');
+      return 'unsupported';
+    }
+
+    setMicPermission((prev) => (prev === 'granted' ? 'granted' : 'prompt'));
+    return micPermissionRef.current === 'granted' ? 'granted' : 'prompt';
+  }, []);
+
+  useEffect(() => {
+    void refreshMicPermission();
+  }, [refreshMicPermission]);
+
+  // Explicit cross-platform microphone permission request (must be safe to invoke from user clicks across Apple, Windows, Android)
+  const requestMicPermission = useCallback(async (opts?: { silentIfUnsupported?: boolean }): Promise<boolean> => {
+    const platform = platformRef.current;
+
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      setMicPermission('unsupported');
+      if (!opts?.silentIfUnsupported) {
+        onStatusErrorRef.current?.(
+          'Microphone permissions require HTTPS (or localhost). Please open NoteTeacher over HTTPS.'
+        );
+      }
+      return false;
+    }
+
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+      setIsRequestingPermission(true);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+        setMicPermission('granted');
+        micPermissionRef.current = 'granted';
+        return true;
+      } catch (err) {
+        const errName = err instanceof Error ? err.name : '';
+        if (
+          errName === 'NotAllowedError' ||
+          errName === 'PermissionDeniedError' ||
+          errName === 'SecurityError'
+        ) {
+          setMicPermission('denied');
+          micPermissionRef.current = 'denied';
+          onStatusErrorRef.current?.(getDeniedPermissionHelpMessage(platform));
+        } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+          onStatusErrorRef.current?.(
+            'No microphone was detected on this device. Connect a microphone and try again.'
+          );
+        } else {
+          onStatusErrorRef.current?.(
+            err instanceof Error
+              ? `Could not access microphone: ${err.message}`
+              : 'Unable to request microphone permission.'
+          );
+        }
+        return false;
+      } finally {
+        setIsRequestingPermission(false);
+      }
+    }
+
+    // Fallback: WebKit/Browser where only SpeechRecognition exists without mediaDevices
+    const Ctor = getSpeechRecognitionCtor();
+    if (Ctor) {
+      setMicPermission('prompt');
+      return true;
+    }
+
+    setMicPermission('unsupported');
+    if (!opts?.silentIfUnsupported) {
+      onStatusErrorRef.current?.(
+        'Microphone access is not supported in this browser. Try Safari, Chrome, or Edge over HTTPS.'
+      );
+    }
+    return false;
+  }, []);
 
   const clearRestartTimer = () => {
     if (restartTimerRef.current !== null) {
@@ -155,20 +356,21 @@ export function useSpeechDictation({
     async (boxId: string, existingStream?: MediaStream) => {
       try {
         usingFallbackRef.current = true;
+        if (!existingStream && (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)) {
+          throw new Error('Audio recording API is not available in this browser.');
+        }
         const stream =
           existingStream ||
           (await navigator.mediaDevices.getUserMedia({ audio: true }));
+        setMicPermission('granted');
+        micPermissionRef.current = 'granted';
         if (!shouldListenRef.current || targetBoxIdRef.current !== boxId) {
           stream.getTracks().forEach((t) => t.stop());
           return;
         }
         mediaStreamRef.current = stream;
 
-        const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : MediaRecorder.isTypeSupported('audio/webm')
-          ? 'audio/webm'
-          : '';
+        const preferredMime = getPreferredAudioMimeType();
 
         const transcribeBlob = async (blob: Blob) => {
           if (blob.size < 1200) return;
@@ -183,12 +385,14 @@ export function useSpeechDictation({
               reader.onerror = () => reject(new Error('Failed reading audio'));
               reader.readAsDataURL(blob);
             });
+            const rawMime = blob.type || preferredMime || 'audio/webm';
+            const cleanMime = rawMime.split(';')[0].trim() || 'audio/webm';
             const resp = await fetch('/api/transcribe', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 audioBase64: base64,
-                mimeType: blob.type || 'audio/webm',
+                mimeType: cleanMime,
               }),
             });
             if (!resp.ok) return;
@@ -216,7 +420,7 @@ export function useSpeechDictation({
           recorder.onstop = () => {
             if (chunks.length > 0) {
               const fullBlob = new Blob(chunks, {
-                type: recorder.mimeType || 'audio/webm',
+                type: recorder.mimeType || preferredMime || 'audio/webm',
               });
               void transcribeBlob(fullBlob);
             }
@@ -242,11 +446,18 @@ export function useSpeechDictation({
       } catch (err) {
         shouldListenRef.current = false;
         setIsListening(false);
-        onStatusErrorRef.current?.(
-          err instanceof Error
-            ? `Microphone access failed: ${err.message}`
-            : 'Unable to access microphone.'
-        );
+        const errName = err instanceof Error ? err.name : '';
+        if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+          setMicPermission('denied');
+          micPermissionRef.current = 'denied';
+          onStatusErrorRef.current?.(getDeniedPermissionHelpMessage(platformRef.current));
+        } else {
+          onStatusErrorRef.current?.(
+            err instanceof Error
+              ? `Microphone access failed: ${err.message}`
+              : 'Unable to access microphone.'
+          );
+        }
       }
     },
     []
@@ -265,6 +476,8 @@ export function useSpeechDictation({
 
       rec.onstart = () => {
         if (shouldListenRef.current && targetBoxIdRef.current === boxId) {
+          setMicPermission('granted');
+          micPermissionRef.current = 'granted';
           setIsListening(true);
         }
       };
@@ -292,18 +505,22 @@ export function useSpeechDictation({
         if (ev.error === 'aborted' || ev.error === 'no-speech') {
           return;
         }
-        if (ev.error === 'not-allowed' || ev.error === 'audio-capture') {
+        if (ev.error === 'not-allowed') {
           shouldListenRef.current = false;
           setIsListening(false);
-          onStatusErrorRef.current?.(
-            ev.error === 'not-allowed'
-              ? 'Microphone permission was denied. Please allow microphone access to dictate.'
-              : 'No microphone was detected on this device.'
-          );
+          setMicPermission('denied');
+          micPermissionRef.current = 'denied';
+          onStatusErrorRef.current?.(getDeniedPermissionHelpMessage(platformRef.current));
+          return;
+        }
+        if (ev.error === 'audio-capture') {
+          shouldListenRef.current = false;
+          setIsListening(false);
+          onStatusErrorRef.current?.('No microphone was detected on this device.');
           return;
         }
         if (ev.error === 'service-not-allowed' || ev.error === 'network') {
-          // Gracefully switch to server-side MediaRecorder transcription if browser speech service blocked
+          // Gracefully switch to server-side MediaRecorder transcription (supports Safari MP4 + Chrome/Edge WebM)
           try {
             rec.stop();
           } catch {}
@@ -336,7 +553,11 @@ export function useSpeechDictation({
         rec.start();
         setIsListening(true);
       } catch {
-        // Ignore rapid start overlap
+        // On Apple Safari/iOS if gesture expired or overlap happened, try fallback if stream permissions allow
+        if (shouldListenRef.current && platformRef.current === 'apple') {
+          recognitionRef.current = null;
+          void startMediaRecorderFallback(boxId);
+        }
       }
     },
     [startMediaRecorderFallback]
@@ -366,21 +587,47 @@ export function useSpeechDictation({
       shouldListenRef.current = true;
       usingFallbackRef.current = false;
 
-      // Prompt for microphone permission upfront if supported
+      const Ctor = getSpeechRecognitionCtor();
+      const platform = platformRef.current;
+
+      // If Web Speech is available and mic permission is ALREADY granted (or on Apple Safari where rec.start() MUST stay synchronous in user gesture),
+      // launch Web Speech immediately so we never break iOS/iPadOS/macOS user-activation or stall Android/Windows audio routing.
+      if (Ctor && (micPermissionRef.current === 'granted' || platform === 'apple')) {
+        launchWebSpeech(boxId, Ctor);
+        return;
+      }
+
+      // Otherwise prompt for microphone permission upfront via getUserMedia (Windows, Android, or browsers without Web Speech)
       let micStream: MediaStream | undefined;
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         try {
           micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          setMicPermission('granted');
+          micPermissionRef.current = 'granted';
         } catch (err) {
           shouldListenRef.current = false;
           setIsListening(false);
-          onStatusErrorRef.current?.(
-            err instanceof Error && err.name === 'NotAllowedError'
-              ? 'Microphone permission denied. Please allow microphone access to dictate.'
-              : 'Microphone is unavailable or permission was denied.'
-          );
+          const errName = err instanceof Error ? err.name : '';
+          if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+            setMicPermission('denied');
+            micPermissionRef.current = 'denied';
+            onStatusErrorRef.current?.(getDeniedPermissionHelpMessage(platform));
+          } else {
+            onStatusErrorRef.current?.(
+              'Microphone is unavailable or permission was denied.'
+            );
+          }
           return;
         }
+      } else if (!Ctor) {
+        shouldListenRef.current = false;
+        setIsListening(false);
+        setMicPermission('unsupported');
+        micPermissionRef.current = 'unsupported';
+        onStatusErrorRef.current?.(
+          'Speech dictation is unavailable in this browser context. Please use HTTPS on Safari, Chrome, or Edge.'
+        );
+        return;
       }
 
       if (!shouldListenRef.current || targetBoxIdRef.current !== boxId) {
@@ -388,7 +635,6 @@ export function useSpeechDictation({
         return;
       }
 
-      const Ctor = getSpeechRecognitionCtor();
       if (Ctor) {
         // Release getUserMedia stream so Web Speech API has clean audio device ownership
         micStream?.getTracks().forEach((t) => t.stop());
@@ -416,6 +662,11 @@ export function useSpeechDictation({
   return {
     isListening,
     activeTargetBoxId,
+    micPermission,
+    isRequestingPermission,
+    devicePlatform: platformRef.current,
+    requestMicPermission,
+    refreshMicPermission,
     startDictation,
     stopDictation,
     syncBaseTextIfIdle,

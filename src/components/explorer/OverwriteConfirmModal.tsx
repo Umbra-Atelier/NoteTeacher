@@ -6,6 +6,7 @@ interface OverwriteConfirmModalProps {
   isOpen: boolean;
   onClose: () => void;
   onConfirmOverwrite: () => void;
+  onSaveAsNew?: () => void;
   fileContext: ActiveFileContext;
 }
 
@@ -13,6 +14,7 @@ export const OverwriteConfirmModal: React.FC<OverwriteConfirmModalProps> = ({
   isOpen,
   onClose,
   onConfirmOverwrite,
+  onSaveAsNew,
   fileContext,
 }) => {
   if (!isOpen) return null;
@@ -54,7 +56,7 @@ export const OverwriteConfirmModal: React.FC<OverwriteConfirmModalProps> = ({
           Clicking <strong>Save &amp; Overwrite</strong> will save back to your file or open your system save picker with the original location and filename pre-filled.
         </p>
 
-        <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+        <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 flex-wrap">
           <button
             type="button"
             onClick={onClose}
@@ -62,6 +64,19 @@ export const OverwriteConfirmModal: React.FC<OverwriteConfirmModalProps> = ({
           >
             Cancel
           </button>
+
+          {onSaveAsNew && (
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onSaveAsNew();
+              }}
+              className="px-3.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              Save As Copy...
+            </button>
+          )}
 
           <button
             type="button"

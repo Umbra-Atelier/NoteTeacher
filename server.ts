@@ -42,13 +42,15 @@ async function startServer() {
         return;
       }
 
+      const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+
       const response = await ai.models.generateContent({
         model: 'gemini-3.5-transcribe',
         contents: {
           parts: [
             {
               inlineData: {
-                mimeType: mimeType || 'audio/webm',
+                mimeType: cleanMime,
                 data: audioBase64,
               },
             },

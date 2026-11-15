@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AngleNegativeDirection,
   AppMode,
   CalculatorBox,
   CanvasImage,
@@ -50,7 +51,7 @@ interface VirtualizedPageSlotProps {
   shapeFill: boolean;
   shapeFillOpacity?: number;
   angleUnit: 'deg' | 'rad';
-  angleRayOrder: 'top_first' | 'bottom_first';
+  angleNegativeDirection: AngleNegativeDirection;
   allowNegativeAngles: boolean;
   eraserType: EraserType;
   eraserSize: number;
@@ -172,7 +173,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   shapeFill,
   shapeFillOpacity = 25,
   angleUnit,
-  angleRayOrder,
+  angleNegativeDirection,
   allowNegativeAngles,
   eraserType,
   eraserSize,
@@ -525,7 +526,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
             shapeFill={shapeFill}
             shapeFillOpacity={shapeFillOpacity}
             angleUnit={angleUnit}
-            angleRayOrder={angleRayOrder}
+            angleNegativeDirection={angleNegativeDirection}
             allowNegativeAngles={allowNegativeAngles}
             eraserType={eraserType}
             eraserSize={eraserSize}

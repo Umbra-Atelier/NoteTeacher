@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import html2canvas from 'html2canvas';
 import {
+  AngleNegativeDirection,
   AppMode,
   PenType,
   ShapeType,
@@ -95,7 +96,7 @@ interface CanvasStageProps {
   shapeFill: boolean;
   shapeFillOpacity?: number;
   angleUnit?: 'deg' | 'rad';
-  angleRayOrder?: 'top_first' | 'bottom_first';
+  angleNegativeDirection?: AngleNegativeDirection;
   allowNegativeAngles?: boolean;
 
   // Edit / Eraser props
@@ -316,7 +317,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   shapeFill,
   shapeFillOpacity = 25,
   angleUnit = 'deg',
-  angleRayOrder = 'top_first',
+  angleNegativeDirection = 'counter_clockwise',
   allowNegativeAngles = false,
   eraserType,
   eraserSize,
@@ -632,6 +633,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const isPinchingRef = useRef<boolean>(false);
   const isStylusDownRef = useRef<boolean>(false);
   const activeSmartStylusPointerIdRef = useRef<number | null>(null);
+  const activePointerIdRef = useRef<number | null>(null);
+  const isDrawingRef = useRef<boolean>(false);
+  const currentPointsRef = useRef<StrokePoint[]>([]);
 
   // Active Drawing State
   const [isDrawing, setIsDrawing] = useState(false);
@@ -793,6 +797,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   // Clean interaction state when switching modes or pages
   useEffect(() => {
+    isDrawingRef.current = false;
+    currentPointsRef.current = [];
+    activePointerIdRef.current = null;
+    isStylusDownRef.current = false;
+    activeSmartStylusPointerIdRef.current = null;
     setIsDrawing(false);
     setCurrentPoints([]);
     setShapeDragStart(null);
@@ -817,6 +826,25 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     setAngleStep('idle');
     setAngleCenter(null);
   }, [mode, pageId]);
+
+  // Safety reset if a pointer lifts or cancels outside the canvas layer
+  useEffect(() => {
+    const resetStuckPointer = (ev: PointerEvent) => {
+      if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
+        activeSmartStylusPointerIdRef.current = null;
+        isStylusDownRef.current = false;
+      }
+      if (activePointerIdRef.current === ev.pointerId && ev.pointerType === 'pen') {
+        isStylusDownRef.current = false;
+      }
+    };
+    window.addEventListener('pointerup', resetStuckPointer, { passive: true });
+    window.addEventListener('pointercancel', resetStuckPointer, { passive: true });
+    return () => {
+      window.removeEventListener('pointerup', resetStuckPointer);
+      window.removeEventListener('pointercancel', resetStuckPointer);
+    };
+  }, []);
 
   useEffect(() => {
     if (ghostedCount === 0) {
@@ -903,6 +931,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               ray2: angleRay2,
               unit: angleUnit,
               allowNegativeAngles,
+              negativeDirection: angleNegativeDirection,
             }
           : null,
       dictatePreview:
@@ -967,6 +996,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     angleRay2,
     angleUnit,
     allowNegativeAngles,
+    angleNegativeDirection,
   ]);
 
   useEffect(() => {
@@ -1464,6 +1494,24 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     return dataUrl;
   };
 
+  const trySetPointerCapture = (target: HTMLElement, pointerId: number) => {
+    try {
+      target.setPointerCapture(pointerId);
+    } catch {
+      // Ignore if pointer already inactive or capture unsupported
+    }
+  };
+
+  const tryReleasePointerCapture = (target: HTMLElement, pointerId: number) => {
+    try {
+      if (target.hasPointerCapture(pointerId)) {
+        target.releasePointerCapture(pointerId);
+      }
+    } catch {
+      // Ignore release errors
+    }
+  };
+
   // Stylus Detection & Palm Rejection Gate (Active Pen vs Smart Tip Passive)
   const isPointerAccepted = (
     e: React.PointerEvent<HTMLDivElement>,
@@ -1503,6 +1551,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
     if (e.pointerType === 'pen') {
       isStylusDownRef.current = true;
+      // An explicit hardware stylus contact must never be blocked by a stale pinch flag
+      isPinchingRef.current = false;
     }
 
     if (!isPointerAccepted(e, 'down')) {
@@ -1513,7 +1563,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (touchInputMode === 'stylus_and_hand') {
       const { x, y } = getStageCoords(e.clientX, e.clientY);
       if (leftToolbarTool === 'zoom') {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        trySetPointerCapture(e.currentTarget, e.pointerId);
+        activePointerIdRef.current = e.pointerId;
         setStylusZoomAnchor({
           clientX: e.clientX,
           clientY: e.clientY,
@@ -1524,7 +1575,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
       if (leftToolbarTool === 'pan') {
-        e.currentTarget.setPointerCapture(e.pointerId);
+        trySetPointerCapture(e.currentTarget, e.pointerId);
+        activePointerIdRef.current = e.pointerId;
         setStylusPanStart({
           clientX: e.clientX,
           clientY: e.clientY,
@@ -1548,7 +1600,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
     if (presenterMode === 'laser' || presenterMode === 'spotlight') return;
-    if (isPinchingRef.current) return;
+    if (isPinchingRef.current && e.pointerType !== 'pen') return;
 
     // Deselect active items when clicking canvas background
     setSelectedGridShapeId(null);
@@ -1562,7 +1614,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       onClickOutsideDictateBox?.();
     }
 
-    e.currentTarget.setPointerCapture(e.pointerId);
+    trySetPointerCapture(e.currentTarget, e.pointerId);
+    activePointerIdRef.current = e.pointerId;
 
     const { x, y } = getStageCoords(e.clientX, e.clientY);
     const pressure = e.pressure || 0.5;
@@ -1631,8 +1684,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
     // DRAWING MODE
     if (mode === 'drawing') {
+      // If a previous stroke's pointerup was missed by the browser, commit it before starting the new word/stroke
+      if (isDrawingRef.current && currentPointsRef.current.length > 0) {
+        onAddStroke({
+          id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          pageId,
+          tool: penType,
+          color: currentColor,
+          width: strokeWidth,
+          opacity: penType === 'highlighter' ? 0.35 : 1,
+          points: currentPointsRef.current,
+        });
+      }
+      const initialPts: StrokePoint[] = [{ x, y, pressure }];
+      isDrawingRef.current = true;
+      currentPointsRef.current = initialPts;
       setIsDrawing(true);
-      setCurrentPoints([{ x, y, pressure }]);
+      setCurrentPoints(initialPts);
       onColorUsed(currentColor);
       return;
     }
@@ -1650,8 +1718,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         if (angleStep === 'idle') {
           setAngleCenter({ x, y });
           setAngleRadius(40);
-          const initialAngle = angleRayOrder === 'top_first' ? -Math.PI / 4 : 0;
-          setAngleRay1(initialAngle);
+          setAngleRay1(-Math.PI / 4);
           setAngleStep('circle_drag');
           return;
         }
@@ -1714,12 +1781,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    if (isPinchingRef.current) return;
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+      return;
+    }
+
+    if (isPinchingRef.current && e.pointerType !== 'pen') return;
 
     // TOUCH CONTROLS MODE: Dynamic Stylus Zoom and Pan
     if (touchInputMode === 'stylus_and_hand') {
-      const isCapturedOrPressed =
-        e.buttons > 0 || e.currentTarget.hasPointerCapture(e.pointerId);
+      let isCapturedOrPressed = e.buttons > 0;
+      try {
+        isCapturedOrPressed = isCapturedOrPressed || e.currentTarget.hasPointerCapture(e.pointerId);
+      } catch {
+        // Ignore capture query errors
+      }
 
       if (leftToolbarTool === 'zoom' && stylusZoomAnchor && isCapturedOrPressed) {
         const dx = e.clientX - stylusZoomAnchor.clientX;
@@ -1795,8 +1870,28 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
 
     if (mode === 'drawing') {
-      if (isDrawing) {
-        setCurrentPoints((prev) => [...prev, { x, y, pressure }]);
+      if (isDrawingRef.current) {
+        const nativeEv = e.nativeEvent as PointerEvent & {
+          getCoalescedEvents?: () => PointerEvent[];
+        };
+        const coalesced =
+          typeof nativeEv.getCoalescedEvents === 'function'
+            ? nativeEv.getCoalescedEvents()
+            : null;
+        if (coalesced && coalesced.length > 0) {
+          const nextPts = [...currentPointsRef.current];
+          for (let i = 0; i < coalesced.length; i++) {
+            const ce = coalesced[i];
+            const c = getStageCoords(ce.clientX, ce.clientY);
+            nextPts.push({ x: c.x, y: c.y, pressure: ce.pressure || pressure });
+          }
+          currentPointsRef.current = nextPts;
+          setCurrentPoints(nextPts);
+        } else {
+          const nextPts = [...currentPointsRef.current, { x, y, pressure }];
+          currentPointsRef.current = nextPts;
+          setCurrentPoints(nextPts);
+        }
         return;
       }
     }
@@ -2096,9 +2191,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+      return;
     }
+    activePointerIdRef.current = null;
+
+    tryReleasePointerCapture(e.currentTarget, e.pointerId);
 
     if (stylusZoomAnchor) {
       setStylusZoomAnchor(null);
@@ -2109,7 +2207,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    if (isPinchingRef.current) return;
+    if (isPinchingRef.current && e.pointerType !== 'pen') return;
 
     const { x, y } = getStageCoords(e.clientX, e.clientY);
 
@@ -2207,22 +2305,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    // DRAWING COMMIT
+    // DRAWING COMMIT (reads synchronous ref points so rapid consecutive words never drop early or short strokes)
     if (mode === 'drawing') {
-      if (isDrawing) {
+      if (isDrawingRef.current) {
+        const pts = [...currentPointsRef.current];
+        const lastPt = pts[pts.length - 1];
+        if (!lastPt || Math.hypot(x - lastPt.x, y - lastPt.y) > 0.25) {
+          pts.push({ x, y, pressure: e.pressure || 0.5 });
+        }
+        isDrawingRef.current = false;
+        currentPointsRef.current = [];
         setIsDrawing(false);
-        if (currentPoints.length > 1) {
+        setCurrentPoints([]);
+        if (pts.length >= 1) {
           onAddStroke({
-            id: `stroke-${Date.now()}`,
+            id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             pageId,
             tool: penType,
             color: currentColor,
             width: strokeWidth,
             opacity: penType === 'highlighter' ? 0.35 : 1,
-            points: currentPoints,
+            points: pts,
           });
         }
-        setCurrentPoints([]);
         return;
       }
     }
@@ -2282,7 +2387,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         }
         if (angleStep === 'ray1_drag') {
           setAngleStep('ray2_drag');
-          const defaultSpan = angleRayOrder === 'top_first' ? Math.PI / 3 : -Math.PI / 3;
+          const defaultSpan =
+            angleNegativeDirection === 'clockwise' ? -Math.PI / 3 : Math.PI / 3;
           setAngleRay2(angleRay1 + defaultSpan);
           return;
         }
@@ -2548,9 +2654,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       isStylusDownRef.current = false;
       activeSmartStylusPointerIdRef.current = null;
     }
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+      return;
     }
+    activePointerIdRef.current = null;
+    tryReleasePointerCapture(e.currentTarget, e.pointerId);
     isCircleErasingRef.current = false;
     lastCircleErasePosRef.current = null;
     setEraserCirclePos(null);
@@ -2563,6 +2671,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       );
       hasGhostedInCurrentGestureRef.current = false;
     }
+    isDrawingRef.current = false;
+    currentPointsRef.current = [];
     setStylusZoomAnchor(null);
     setStylusPanStart(null);
     setIsDrawing(false);
@@ -2581,6 +2691,36 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     setPhotoCropCurrent(null);
     setPhotoCropClientStart(null);
     setPhotoCropClientCurrent(null);
+  };
+
+  // Lost Pointer Capture: if browser drops pointer capture before pointerup, commit active ink stroke cleanly instead of losing it
+  const handleLostPointerCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'pen' || activeSmartStylusPointerIdRef.current === e.pointerId) {
+      isStylusDownRef.current = false;
+      activeSmartStylusPointerIdRef.current = null;
+    }
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+      return;
+    }
+    activePointerIdRef.current = null;
+    if (mode === 'drawing' && isDrawingRef.current) {
+      const pts = [...currentPointsRef.current];
+      isDrawingRef.current = false;
+      currentPointsRef.current = [];
+      setIsDrawing(false);
+      setCurrentPoints([]);
+      if (pts.length >= 1) {
+        onAddStroke({
+          id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          pageId,
+          tool: penType,
+          color: currentColor,
+          width: strokeWidth,
+          opacity: penType === 'highlighter' ? 0.35 : 1,
+          points: pts,
+        });
+      }
+    }
   };
 
   // Magic Grab Compass Handle: Click & Hold 400ms or drag to smoothly move items
@@ -2697,14 +2837,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     const obtuseSpan = 2 * Math.PI - acuteSpan;
     const chosenSpan = chosenSweep === 'acute' ? acuteSpan : obtuseSpan;
 
-    // Detect negative angle if top ray is dragged through bottom ray (negative direction)
+    // Detect negative angle when Ray 2 is pulled past Ray 1 in the configured negative direction
     let rawDiff = angleRay2 - angleRay1;
     while (rawDiff > Math.PI) rawDiff -= 2 * Math.PI;
     while (rawDiff < -Math.PI) rawDiff += 2 * Math.PI;
-    const isNegative = allowNegativeAngles && rawDiff < 0;
+    const isNegative =
+      allowNegativeAngles &&
+      (angleNegativeDirection === 'clockwise' ? rawDiff > 0 : rawDiff < 0);
 
     let calculatedDeg = Math.round((chosenSpan * 180) / Math.PI);
-    if (isNegative) calculatedDeg = -calculatedDeg;
+    if (isNegative && chosenSweep === 'acute') calculatedDeg = -calculatedDeg;
 
     // 1. Ray 1 (terminal arm 1 - line, no arrow)
     const ray1: GeometricShape = {
@@ -4126,6 +4268,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerCancel}
+            onLostPointerCapture={handleLostPointerCapture}
             onPointerLeave={() => {
               if (!isCircleErasingRef.current) {
                 setEraserCirclePos(null);
@@ -4324,7 +4467,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           let rawDiff = angleRay2 - angleRay1;
           while (rawDiff > Math.PI) rawDiff -= 2 * Math.PI;
           while (rawDiff < -Math.PI) rawDiff += 2 * Math.PI;
-          const isNegative = allowNegativeAngles && rawDiff < 0;
+          const isNegative =
+            allowNegativeAngles &&
+            (angleNegativeDirection === 'clockwise' ? rawDiff > 0 : rawDiff < 0);
 
           const formatAngleVal = (spanRad: number, isNeg: boolean) => {
             const sign = isNeg ? '-' : '';

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Maximize2, X, CheckCircle2, AlertCircle, Loader2, Mic, MicOff } from 'lucide-react';
 import {
+  AngleNegativeDirection,
   AppMode,
   PenType,
   ShapeType,
@@ -26,6 +27,7 @@ import {
   LivePresenterToolState,
   ControlsVisibility,
   ExplorerFileItem,
+  ExplorerFolderTab,
   ActiveFileContext,
 } from './types';
 import { useSpeechDictation } from './utils/speechDictation';
@@ -37,16 +39,35 @@ import { ClearPageModal } from './components/ClearPageModal';
 import { DocumentScrollBar } from './components/DocumentScrollBar';
 import { OnScreenKeyboard, VirtualKeyAction } from './components/OnScreenKeyboard';
 import { OverwriteConfirmModal } from './components/explorer/OverwriteConfirmModal';
+import { ClassicFileExplorerModal } from './components/explorer/ClassicFileExplorerModal';
 import { harvestDocumentColors, CLASSROOM_PRESET_COLORS } from './utils/colorUtils';
 import { INITIAL_PAGES } from './utils/sampleData';
-import { executeSaveAs, ProjectData } from './utils/exportUtils';
+import {
+  buildSaveAsBlob,
+  canShareFilesOnDevice,
+  doesHandleMatchSaveMode,
+  executeSaveAs,
+  getDefaultSaveFileName,
+  ProjectData,
+  shareFileWithSystemSheet,
+  triggerDirectBlobDownload,
+} from './utils/exportUtils';
 import { detectConnectedScreens, FALLBACK_SCREENS } from './utils/screenUtils';
 import { loadPdfPages } from './utils/pdfLoader';
 import { sweepCircleErase } from './utils/partialEraseUtils';
 import {
+  extractFileExtension,
+  getDirectoryHandle,
   getSavedActiveFileContext,
+  loadSavedFolderTabs,
+  queryHandlePermission,
+  runExplorerCleanupMigration,
   saveActiveFileContext,
+  saveDirectoryHandle,
+  saveFolderTabs,
+  scanDirectoryFiles,
   verifyHandlePermission,
+  writeFileToDirectoryHandle,
 } from './utils/fileExplorerStorage';
 import {
   getCachedFullPdfPageUrl,
@@ -87,6 +108,13 @@ const EMPTY_GRAPHS: DesmosBox[] = [];
 const EMPTY_CALCULATORS: CalculatorBox[] = [];
 const EMPTY_IMAGES: CanvasImage[] = [];
 const EMPTY_DICTATED: DictatedTextBox[] = [];
+
+function cloneDocData<T>(val: T): T {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(val);
+  }
+  return JSON.parse(JSON.stringify(val)) as T;
+}
 
 export default function App() {
   // Mode & Active Tools
@@ -173,6 +201,17 @@ export default function App() {
   });
   const [showOverwriteModal, setShowOverwriteModal] = useState(false);
   const [pendingOverwriteSaveMode, setPendingOverwriteSaveMode] = useState<SaveAsMode | null>(null);
+  const [saveExplorerState, setSaveExplorerState] = useState<{
+    isOpen: boolean;
+    defaultMode: SaveAsMode;
+    suggestedName?: string;
+    notice: string | null;
+  }>({
+    isOpen: false,
+    defaultMode: 'pdf_as_shown',
+    notice: null,
+  });
+  const [saveExplorerTabs, setSaveExplorerTabs] = useState<ExplorerFolderTab[]>([]);
   const [appStatusNotice, setAppStatusNotice] = useState<{
     kind: 'info' | 'success' | 'error';
     message: string;
@@ -287,7 +326,8 @@ export default function App() {
 
   // Geometric Angle Tool Settings
   const [angleUnit, setAngleUnit] = useState<'deg' | 'rad'>('deg');
-  const [angleRayOrder, setAngleRayOrder] = useState<'top_first' | 'bottom_first'>('top_first');
+  const [angleNegativeDirection, setAngleNegativeDirection] =
+    useState<AngleNegativeDirection>('counter_clockwise');
   const [allowNegativeAngles, setAllowNegativeAngles] = useState<boolean>(false);
 
   // Graph opacity
@@ -320,6 +360,9 @@ export default function App() {
 
   const {
     isListening: isDictating,
+    micPermission,
+    isRequestingPermission: isRequestingMicPermission,
+    requestMicPermission,
     startDictation,
     stopDictation,
     syncBaseTextIfIdle,
@@ -354,9 +397,15 @@ export default function App() {
         setSelectedDictateBoxId(curId);
         setActiveDictateBoxId(null);
       }
+      if (
+        nextMode === 'dictate' &&
+        (micPermission === 'prompt' || micPermission === 'unknown')
+      ) {
+        void requestMicPermission({ silentIfUnsupported: true });
+      }
       setMode(nextMode);
     },
-    [stopDictation]
+    [stopDictation, micPermission, requestMicPermission]
   );
 
   const handleSetDictateEraserActive = useCallback(
@@ -1183,12 +1232,12 @@ export default function App() {
     setHistoryStack((prev) => [
       ...prev.slice(-25),
       {
-        strokes: JSON.parse(JSON.stringify(strokes)),
-        shapes: JSON.parse(JSON.stringify(shapes)),
-        graphs: JSON.parse(JSON.stringify(graphs)),
-        calculators: JSON.parse(JSON.stringify(calculators)),
-        images: JSON.parse(JSON.stringify(images)),
-        dictatedTextBoxes: JSON.parse(JSON.stringify(dictatedTextBoxes)),
+        strokes: cloneDocData(strokes),
+        shapes: cloneDocData(shapes),
+        graphs: cloneDocData(graphs),
+        calculators: cloneDocData(calculators),
+        images: cloneDocData(images),
+        dictatedTextBoxes: cloneDocData(dictatedTextBoxes),
       },
     ]);
     setRedoStack([]);
@@ -1202,12 +1251,12 @@ export default function App() {
     setRedoStack((prev) => [
       ...prev,
       {
-        strokes: JSON.parse(JSON.stringify(strokes)),
-        shapes: JSON.parse(JSON.stringify(shapes)),
-        graphs: JSON.parse(JSON.stringify(graphs)),
-        calculators: JSON.parse(JSON.stringify(calculators)),
-        images: JSON.parse(JSON.stringify(images)),
-        dictatedTextBoxes: JSON.parse(JSON.stringify(dictatedTextBoxes)),
+        strokes: cloneDocData(strokes),
+        shapes: cloneDocData(shapes),
+        graphs: cloneDocData(graphs),
+        calculators: cloneDocData(calculators),
+        images: cloneDocData(images),
+        dictatedTextBoxes: cloneDocData(dictatedTextBoxes),
       },
     ]);
     setStrokes(previous.strokes);
@@ -1227,12 +1276,12 @@ export default function App() {
     setHistoryStack((prev) => [
       ...prev,
       {
-        strokes: JSON.parse(JSON.stringify(strokes)),
-        shapes: JSON.parse(JSON.stringify(shapes)),
-        graphs: JSON.parse(JSON.stringify(graphs)),
-        calculators: JSON.parse(JSON.stringify(calculators)),
-        images: JSON.parse(JSON.stringify(images)),
-        dictatedTextBoxes: JSON.parse(JSON.stringify(dictatedTextBoxes)),
+        strokes: cloneDocData(strokes),
+        shapes: cloneDocData(shapes),
+        graphs: cloneDocData(graphs),
+        calculators: cloneDocData(calculators),
+        images: cloneDocData(images),
+        dictatedTextBoxes: cloneDocData(dictatedTextBoxes),
       },
     ]);
     setStrokes(next.strokes);
@@ -2435,14 +2484,17 @@ export default function App() {
       return;
     }
     const targetId = activeDictateBoxId || selectedDictateBoxId;
-    if (!targetId) return;
+    if (!targetId) {
+      void requestMicPermission();
+      return;
+    }
     const target = dictatedTextBoxesRef.current.find((b) => b.id === targetId);
     if (!target) return;
     setEditingDictateBoxId(null);
     setSelectedDictateBoxId(null);
     setActiveDictateBoxId(target.id);
     void startDictation(target.id, target.text);
-  }, [isDictating, stopDictation, activeDictateBoxId, selectedDictateBoxId, startDictation]);
+  }, [isDictating, stopDictation, activeDictateBoxId, selectedDictateBoxId, startDictation, requestMicPermission]);
 
   const handleActivatePage = useCallback((pageId: string) => {
     setCurrentPageId((prev) => (prev === pageId ? prev : pageId));
@@ -2732,12 +2784,262 @@ export default function App() {
     });
   };
 
-  const executeActualSaveAs = (saveMode: SaveAsMode) => {
+  const refreshSaveExplorerTabs = useCallback(async () => {
+    await runExplorerCleanupMigration();
+    const saved = loadSavedFolderTabs();
+    setSaveExplorerTabs(saved);
+    const hydrated = await Promise.all(
+      saved.map(async (tab) => {
+        if (tab.sourceType === 'local_handle' && !tab.isSingleFileTab) {
+          const dirHandle = await getDirectoryHandle(tab.id);
+          if (dirHandle && (await queryHandlePermission(dirHandle, 'read'))) {
+            const files = await scanDirectoryFiles(dirHandle, tab.pathBreadcrumb, tab.files);
+            return {
+              ...tab,
+              dirHandle,
+              files,
+              missingCount: files.filter((f) => f.isMissing).length,
+              accessState: 'granted' as const,
+            };
+          }
+          return { ...tab, accessState: 'permission_required' as const };
+        }
+        return tab;
+      })
+    );
+    setSaveExplorerTabs(hydrated);
+  }, []);
+
+  const openSaveExplorerModal = useCallback(
+    (defaultMode: SaveAsMode, notice: string | null = null, suggestedName?: string) => {
+      setSaveExplorerTabs(loadSavedFolderTabs());
+      setSaveExplorerState({
+        isOpen: true,
+        defaultMode,
+        suggestedName:
+          suggestedName ||
+          getDefaultSaveFileName(defaultMode, pages, currentPageId, activeFileContext?.name),
+        notice,
+      });
+      void refreshSaveExplorerTabs();
+    },
+    [pages, currentPageId, activeFileContext?.name, refreshSaveExplorerTabs]
+  );
+
+  const handleAddLocalFolderFromSaveModal = useCallback(async (): Promise<ExplorerFolderTab | null> => {
+    if (typeof window === 'undefined' || !('showDirectoryPicker' in window)) {
+      setAppStatusNotice({
+        kind: 'info',
+        message: 'Folder writing is unavailable in this browser. Use "Download to Device" to save your file.',
+      });
+      return null;
+    }
+    try {
+      let dirHandle: FileSystemDirectoryHandle;
+      try {
+        // @ts-expect-error showDirectoryPicker options
+        dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      } catch (permErr: unknown) {
+        if ((permErr as Error)?.name === 'AbortError') return null;
+        if ((permErr as Error)?.name === 'SecurityError') throw permErr;
+        // @ts-expect-error showDirectoryPicker options
+        dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+      }
+      const pathBreadcrumb = `/Local Device/${dirHandle.name}`;
+      const existing = loadSavedFolderTabs();
+
+      let matchedTab: ExplorerFolderTab | undefined;
+      for (const t of existing) {
+        if (t.isSingleFileTab) continue;
+        const candidateHandle =
+          t.dirHandle || (t.sourceType === 'local_handle' ? await getDirectoryHandle(t.id) : null);
+        if (candidateHandle && typeof dirHandle.isSameEntry === 'function') {
+          try {
+            if (await dirHandle.isSameEntry(candidateHandle)) {
+              matchedTab = t;
+              break;
+            }
+          } catch {}
+        }
+      }
+      if (!matchedTab) {
+        matchedTab = existing.find(
+          (t) =>
+            !t.isSingleFileTab &&
+            (t.pathBreadcrumb === pathBreadcrumb ||
+              t.lastKnownPath === pathBreadcrumb ||
+              t.name === dirHandle.name)
+        );
+      }
+
+      const targetTabId = matchedTab ? matchedTab.id : `tab-dir-${Date.now()}`;
+      const targetBreadcrumb = matchedTab?.pathBreadcrumb || pathBreadcrumb;
+      const files = await scanDirectoryFiles(dirHandle, targetBreadcrumb, matchedTab?.files);
+      await saveDirectoryHandle(targetTabId, dirHandle);
+      const updatedTab: ExplorerFolderTab = {
+        ...(matchedTab || {}),
+        id: targetTabId,
+        name: dirHandle.name,
+        iconType: 'folder',
+        sourceType: 'local_handle',
+        pathBreadcrumb: targetBreadcrumb,
+        dirHandle,
+        files,
+        missingCount: files.filter((f) => f.isMissing).length,
+        accessState: 'granted',
+        lastKnownPath: targetBreadcrumb,
+      };
+      const updated = matchedTab
+        ? existing.map((t) => (t.id === matchedTab.id ? updatedTab : t))
+        : [...existing, updatedTab];
+      saveFolderTabs(updated);
+      setSaveExplorerTabs((prev) =>
+        matchedTab
+          ? prev.map((t) => (t.id === matchedTab.id ? updatedTab : t))
+          : [...prev.filter((t) => t.id !== targetTabId), updatedTab]
+      );
+      return updatedTab;
+    } catch (err: unknown) {
+      const errName = (err as Error)?.name;
+      if (errName === 'AbortError') return null;
+      setSaveExplorerState((prev) => ({
+        ...prev,
+        notice:
+          errName === 'SecurityError'
+            ? 'Your browser blocked the native folder dialog inside this embedded frame. Click "Download to Device" below to save directly.'
+            : 'Unable to open native folder picker in this browser context. Use "Download to Device" below.',
+      }));
+      return null;
+    }
+  }, []);
+
+  const handleSaveToDirectory = useCallback(
+    async (
+      dirHandle: FileSystemDirectoryHandle,
+      fileName: string,
+      saveMode: SaveAsMode,
+      pathBreadcrumb: string
+    ) => {
+      const stageEl =
+        pageRefsMapRef.current.get(currentPageId) ||
+        pageRefsMapRef.current.values().next().value ||
+        mainScrollRef.current;
+      if (!stageEl) {
+        throw new Error('Document stage is not ready yet.');
+      }
+      const { blob } = await buildSaveAsBlob(
+        saveMode,
+        stageEl,
+        graphs,
+        pages,
+        strokes,
+        shapes,
+        calculators,
+        currentPageId,
+        images,
+        fileName,
+        dictatedTextBoxes
+      );
+      const fileHandle = await writeFileToDirectoryHandle(dirHandle, fileName, blob);
+      setActiveFileContext({
+        name: fileName,
+        extension: extractFileExtension(fileName),
+        pathBreadcrumb,
+        sourceType: 'local_handle',
+        fileHandle,
+      });
+      setAppStatusNotice({
+        kind: 'success',
+        message: `Saved "${fileName}" to ${pathBreadcrumb}`,
+      });
+    },
+    [currentPageId, graphs, pages, strokes, shapes, calculators, images, dictatedTextBoxes]
+  );
+
+  const handleDownloadFallback = useCallback(
+    async (fileName: string, saveMode: SaveAsMode) => {
+      const stageEl =
+        pageRefsMapRef.current.get(currentPageId) ||
+        pageRefsMapRef.current.values().next().value ||
+        mainScrollRef.current;
+      if (!stageEl) {
+        throw new Error('Document stage is not ready yet.');
+      }
+      const { blob } = await buildSaveAsBlob(
+        saveMode,
+        stageEl,
+        graphs,
+        pages,
+        strokes,
+        shapes,
+        calculators,
+        currentPageId,
+        images,
+        fileName,
+        dictatedTextBoxes
+      );
+      triggerDirectBlobDownload(blob, fileName);
+      setAppStatusNotice({
+        kind: 'success',
+        message: `Saved "${fileName}" to Downloads.`,
+      });
+    },
+    [currentPageId, graphs, pages, strokes, shapes, calculators, images, dictatedTextBoxes]
+  );
+
+  const handleShareFallback = useCallback(
+    async (fileName: string, saveMode: SaveAsMode) => {
+      const stageEl =
+        pageRefsMapRef.current.get(currentPageId) ||
+        pageRefsMapRef.current.values().next().value ||
+        mainScrollRef.current;
+      if (!stageEl) {
+        throw new Error('Document stage is not ready yet.');
+      }
+      const { blob, mimeType } = await buildSaveAsBlob(
+        saveMode,
+        stageEl,
+        graphs,
+        pages,
+        strokes,
+        shapes,
+        calculators,
+        currentPageId,
+        images,
+        fileName,
+        dictatedTextBoxes
+      );
+      const shareResult = await shareFileWithSystemSheet(blob, fileName, mimeType);
+      if (shareResult === 'shared') {
+        setAppStatusNotice({
+          kind: 'success',
+          message: `Shared / saved "${fileName}".`,
+        });
+      } else if (shareResult === 'unsupported') {
+        triggerDirectBlobDownload(blob, fileName);
+        setAppStatusNotice({
+          kind: 'info',
+          message: `Share sheet unavailable here; saved "${fileName}" to Downloads instead.`,
+        });
+      }
+    },
+    [currentPageId, graphs, pages, strokes, shapes, calculators, images, dictatedTextBoxes]
+  );
+
+  const executeActualSaveAs = (saveMode: SaveAsMode, options?: { forceSaveAs?: boolean }) => {
     const stageEl =
       pageRefsMapRef.current.get(currentPageId) ||
       pageRefsMapRef.current.values().next().value ||
       mainScrollRef.current;
     if (!stageEl) return;
+
+    const forceNew = Boolean(options?.forceSaveAs);
+    const suggestedName = getDefaultSaveFileName(
+      saveMode,
+      pages,
+      currentPageId,
+      activeFileContext?.name
+    );
 
     void executeSaveAs(
       saveMode,
@@ -2750,15 +3052,50 @@ export default function App() {
       calculators,
       currentPageId,
       images,
-      activeFileContext?.name,
-      activeFileContext?.fileHandle,
+      suggestedName,
+      forceNew ? undefined : activeFileContext?.fileHandle,
       dictatedTextBoxes
-    );
+    ).then((result) => {
+      if (result.status === 'saved') {
+        if (result.fileHandle) {
+          setActiveFileContext({
+            id: activeFileContext?.id,
+            name: result.fileName,
+            extension: extractFileExtension(result.fileName),
+            pathBreadcrumb:
+              result.method === 'handle_overwrite' && activeFileContext?.pathBreadcrumb
+                ? activeFileContext.pathBreadcrumb
+                : `/Local Device/${result.fileName}`,
+            sourceType: 'local_handle',
+            fileHandle: result.fileHandle,
+          });
+        }
+        setAppStatusNotice({
+          kind: 'success',
+          message: `Saved "${result.fileName}".`,
+        });
+      } else if (result.status === 'needs_explorer_fallback') {
+        const shareSupported = canShareFilesOnDevice();
+        const notice =
+          result.reason === 'blocked_in_iframe'
+            ? shareSupported
+              ? 'Your browser blocked the native Save dialog inside this embedded frame. Use "Save to Files / Share..." to pick a specific folder (Files, iCloud, Drive, OneDrive), choose a mounted folder below, or click "Download to Downloads".'
+              : 'Your browser blocked opening the native OS Save dialog inside this embedded frame. Choose a mounted folder below to Save Copy Here, or click "Download to Downloads".'
+            : shareSupported
+            ? 'Direct folder picking is blocked on this mobile browser. Tap "Save to Files / Share..." below to choose an exact destination folder (Files, iCloud, Google Drive, OneDrive), or tap "Download to Downloads".'
+            : 'Native File System Save dialog is unavailable in this browser. Choose a folder below or click "Download to Downloads".';
+        openSaveExplorerModal(result.mode, notice, result.suggestedName);
+      }
+    });
   };
 
   const handleSaveAs = (saveMode: SaveAsMode) => {
-    // If saving an edited file that has an existing path in the file explorer, show confirmation
-    if (activeFileContext && activeFileContext.pathBreadcrumb) {
+    // Only prompt overwrite when the open file format matches the selected save mode
+    if (
+      activeFileContext &&
+      activeFileContext.pathBreadcrumb &&
+      doesHandleMatchSaveMode(activeFileContext.name, saveMode)
+    ) {
       setPendingOverwriteSaveMode(saveMode);
       setShowOverwriteModal(true);
       return;
@@ -3020,8 +3357,8 @@ export default function App() {
         onUpdateStylusConfig={handleUpdateStylusConfig}
         angleUnit={angleUnit}
         onSetAngleUnit={setAngleUnit}
-        angleRayOrder={angleRayOrder}
-        onSetAngleRayOrder={setAngleRayOrder}
+        angleNegativeDirection={angleNegativeDirection}
+        onSetAngleNegativeDirection={setAngleNegativeDirection}
         allowNegativeAngles={allowNegativeAngles}
         onSetAllowNegativeAngles={setAllowNegativeAngles}
         onAddCalculatorAtCenter={handleAddCalculatorAtCenter}
@@ -3074,12 +3411,27 @@ export default function App() {
         onUploadPdf={handleUploadPdf}
         isDarkMode={isDarkMode}
         onToggleTheme={() => setIsDarkMode(!isDarkMode)}
+        onStatusNotice={(kind, message) => setAppStatusNotice({ kind, message })}
         onOpenFileFromExplorer={handleOpenFileFromExplorer}
         activeFileContext={activeFileContext}
+        onOpenSaveExplorer={(saveMode) =>
+          openSaveExplorerModal(
+            saveMode,
+            canShareFilesOnDevice()
+              ? 'Select a local folder, tap "Save to Files / Share..." to choose any folder (Files, iCloud, Drive), or click "Download to Downloads".'
+              : 'Select a local folder to save directly into, or click "Download to Downloads".'
+          )
+        }
+        onSaveToDirectory={handleSaveToDirectory}
+        onDownloadFallback={handleDownloadFallback}
+        onShareFallback={canShareFilesOnDevice() ? handleShareFallback : undefined}
         dictateSubMode={dictateSubMode}
         onSetDictateSubMode={setDictateSubMode}
         constantDictateFontSize={constantDictateFontSize}
         onSetConstantDictateFontSize={setConstantDictateFontSize}
+        micPermission={micPermission}
+        isRequestingMicPermission={isRequestingMicPermission}
+        onRequestMicPermission={() => void requestMicPermission()}
         isGeometricEraserActive={isGeometricEraserActive}
         onSetGeometricEraserActive={setIsGeometricEraserActive}
         isDictateEraserActive={isDictateEraserActive}
@@ -3136,8 +3488,17 @@ export default function App() {
             if (!mainEl) return;
             const rect = mainEl.getBoundingClientRect();
             if (e.clientX >= rect.right - 84) {
-              lastRightEdgeInputAtRef.current = Date.now();
               const targetEl = e.target as HTMLElement | null;
+              const isInsideDrawingCanvas = Boolean(targetEl?.closest('.drawing-layer'));
+              if (
+                isInsideDrawingCanvas &&
+                (stageMode === 'drawing' ||
+                  stageMode === 'geometric' ||
+                  stageMode === 'dictate')
+              ) {
+                return;
+              }
+              lastRightEdgeInputAtRef.current = Date.now();
               const isInWidget = Boolean(
                 targetEl?.closest('.desmos-box, .calculator-box, .image-box, [data-testid="right-edge-scrollbar"]')
               );
@@ -3205,7 +3566,7 @@ export default function App() {
                 shapeFill={shapeFill}
                 shapeFillOpacity={shapeFillOpacity}
                 angleUnit={angleUnit}
-                angleRayOrder={angleRayOrder}
+                angleNegativeDirection={angleNegativeDirection}
                 allowNegativeAngles={allowNegativeAngles}
                 eraserType={eraserType}
                 eraserSize={eraserSize}
@@ -3299,16 +3660,59 @@ export default function App() {
               setPendingOverwriteSaveMode(null);
             }
           }}
+          onSaveAsNew={() => {
+            if (pendingOverwriteSaveMode) {
+              executeActualSaveAs(pendingOverwriteSaveMode, { forceSaveAs: true });
+              setPendingOverwriteSaveMode(null);
+            }
+          }}
           fileContext={activeFileContext}
         />
       )}
 
+      {/* 4B. IN-APP SAVE FILE EXPLORER MODAL (Opened when saving to explorer folder or when OS Save Picker is blocked/unsupported) */}
+      <ClassicFileExplorerModal
+        isOpen={saveExplorerState.isOpen}
+        onClose={() => setSaveExplorerState((prev) => ({ ...prev, isOpen: false }))}
+        folderTabs={saveExplorerTabs}
+        onOpenFile={(file) => {
+          void handleOpenFileFromExplorer(file);
+        }}
+        onRefreshExplorer={() => void refreshSaveExplorerTabs()}
+        modalMode="save"
+        initialSaveMode={saveExplorerState.defaultMode}
+        suggestedSaveName={saveExplorerState.suggestedName}
+        saveNotice={saveExplorerState.notice}
+        onSaveToDirectory={handleSaveToDirectory}
+        onDownloadFallback={handleDownloadFallback}
+        onShareFallback={canShareFilesOnDevice() ? handleShareFallback : undefined}
+        onAddLocalFolder={handleAddLocalFolderFromSaveModal}
+      />
+
       {/* 5. BOTTOM-MIDDLE PULSING BLUE MICROPHONE CONTROL FOR LIVE DICTATION */}
       {isBottomMicVisible && (
         <div
-          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[10002] flex flex-col items-center gap-1.5"
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[10002] flex flex-col items-center gap-2"
           data-testid="dictate-mic-dock"
         >
+          {(micPermission === 'denied' || micPermission === 'prompt') && !isDictating && (
+            <button
+              type="button"
+              disabled={isRequestingMicPermission}
+              onClick={() => void requestMicPermission()}
+              className={`px-3.5 py-1.5 rounded-full text-xs font-bold shadow-lg border transition-colors ${
+                micPermission === 'denied'
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-400'
+                  : 'bg-sky-600 hover:bg-sky-700 text-white border-sky-400'
+              }`}
+            >
+              {isRequestingMicPermission
+                ? 'Requesting Microphone Permission...'
+                : micPermission === 'denied'
+                ? 'Microphone Blocked · Tap to Allow / View Help'
+                : 'Allow Microphone Permission'}
+            </button>
+          )}
           <div className="relative flex items-center justify-center">
             {isDictating && (
               <>

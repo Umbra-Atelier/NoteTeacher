@@ -17,6 +17,7 @@ import {
   ExplorerFileItem,
   ExplorerFolderTab,
   ActiveFileContext,
+  SaveAsMode,
 } from '../../types';
 import { HomeDashboardTab } from './HomeDashboardTab';
 import { FolderContentsTab } from './FolderContentsTab';
@@ -45,11 +46,23 @@ interface FileExplorerViewProps {
   onOpenFile: (file: ExplorerFileItem, rawFile?: File) => void;
   onCloseModal: () => void;
   activeFileContext?: ActiveFileContext | null;
+  onSaveToDirectory?: (
+    dirHandle: FileSystemDirectoryHandle,
+    fileName: string,
+    saveMode: SaveAsMode,
+    pathBreadcrumb: string
+  ) => Promise<void>;
+  onDownloadFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
+  onShareFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
 }
 
 export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   onOpenFile,
   onCloseModal,
+  activeFileContext,
+  onSaveToDirectory,
+  onDownloadFallback,
+  onShareFallback,
 }) => {
   const [activeTabId, setActiveTabId] = useState<string>('home');
   const [folderTabs, setFolderTabs] = useState<ExplorerFolderTab[]>([]);
@@ -302,6 +315,62 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     }
   };
 
+  const findMatchingFolderTab = async (
+    tabs: ExplorerFolderTab[],
+    folderName: string,
+    pathBreadcrumb: string,
+    dirHandle?: FileSystemDirectoryHandle
+  ): Promise<ExplorerFolderTab | undefined> => {
+    if (dirHandle) {
+      for (const t of tabs) {
+        if (t.isSingleFileTab) continue;
+        const candidateHandle =
+          t.dirHandle || (t.sourceType === 'local_handle' ? await getDirectoryHandle(t.id) : null);
+        if (candidateHandle && typeof dirHandle.isSameEntry === 'function') {
+          try {
+            if (await dirHandle.isSameEntry(candidateHandle)) {
+              return t;
+            }
+          } catch {}
+        }
+      }
+    }
+    return tabs.find(
+      (t) =>
+        !t.isSingleFileTab &&
+        (t.pathBreadcrumb === pathBreadcrumb ||
+          t.lastKnownPath === pathBreadcrumb ||
+          t.name === folderName)
+    );
+  };
+
+  const findMatchingSingleFileTab = async (
+    tabs: ExplorerFolderTab[],
+    fileName: string,
+    pathBreadcrumb: string,
+    fileHandle?: FileSystemFileHandle
+  ): Promise<ExplorerFolderTab | undefined> => {
+    if (fileHandle) {
+      for (const t of tabs) {
+        if (!t.isSingleFileTab) continue;
+        const candidateHandle =
+          t.sourceType === 'local_handle' ? await getSingleFileHandle(t.id) : null;
+        if (candidateHandle && typeof fileHandle.isSameEntry === 'function') {
+          try {
+            if (await fileHandle.isSameEntry(candidateHandle)) {
+              return t;
+            }
+          } catch {}
+        }
+      }
+    }
+    return tabs.find(
+      (t) =>
+        t.isSingleFileTab &&
+        (t.pathBreadcrumb === pathBreadcrumb || t.fileName === fileName || t.name === fileName)
+    );
+  };
+
   // Add Folder tab via Native File System Access API or browser folder picker fallback
   const executeAddFolder = async () => {
     setShowAddTabMenu(false);
@@ -316,14 +385,49 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           mode: 'read',
         });
         const folderName = dirHandle.name;
-        const newTabId = `tab-dir-${Date.now()}`;
         const pathBreadcrumb = `/Local Device/${folderName}`;
+        const currentTabs = folderTabsRef.current;
+        const existingTab = await findMatchingFolderTab(
+          currentTabs,
+          folderName,
+          pathBreadcrumb,
+          dirHandle
+        );
 
-        const files = await scanDirectoryFiles(dirHandle, pathBreadcrumb);
-        await saveDirectoryHandle(newTabId, dirHandle);
+        const targetTabId = existingTab ? existingTab.id : `tab-dir-${Date.now()}`;
+        const files = await scanDirectoryFiles(
+          dirHandle,
+          existingTab?.pathBreadcrumb || pathBreadcrumb,
+          existingTab?.files
+        );
+        await saveDirectoryHandle(targetTabId, dirHandle);
+
+        if (existingTab) {
+          existingTab.files.forEach((f) => rawFileMapRef.current.delete(f.id));
+          const updated = currentTabs.map((t) =>
+            t.id === existingTab.id
+              ? {
+                  ...t,
+                  name: folderName,
+                  sourceType: 'local_handle' as const,
+                  pathBreadcrumb: t.pathBreadcrumb || pathBreadcrumb,
+                  dirHandle,
+                  files,
+                  missingCount: files.filter((f) => f.isMissing).length,
+                  accessState: 'granted' as const,
+                  lastKnownPath: t.lastKnownPath || pathBreadcrumb,
+                }
+              : t
+          );
+          setFolderTabs(updated);
+          saveFolderTabs(updated);
+          setActiveTabId(existingTab.id);
+          setExplorerInfoNotice(`Permission re-granted for "${folderName}".`);
+          return;
+        }
 
         const newTab: ExplorerFolderTab = {
-          id: newTabId,
+          id: targetTabId,
           name: folderName,
           iconType: 'folder',
           sourceType: 'local_handle',
@@ -335,10 +439,10 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           lastKnownPath: pathBreadcrumb,
         };
 
-        const updated = [...folderTabs, newTab];
+        const updated = [...currentTabs, newTab];
         setFolderTabs(updated);
         saveFolderTabs(updated);
-        setActiveTabId(newTabId);
+        setActiveTabId(targetTabId);
         return;
       } catch (err: unknown) {
         const errName = (err as Error)?.name;
@@ -359,56 +463,87 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     folderInputRef.current?.click();
   };
 
-  // Fallback Directory Input Handler
+  // Fallback Directory Input Handler (updates existing matching folder tab in place instead of duplicating)
   const handleFallbackFolderUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
-    if (fileList && fileList.length > 0) {
-      const firstPath = fileList[0].webkitRelativePath || fileList[0].name;
-      const folderName = firstPath.split('/')[0] || 'Selected Folder';
-      const targetTabId = reshareTargetTabIdRef.current;
-      reshareTargetTabIdRef.current = null;
-      const pathBreadcrumb = `/Local Device/${folderName}`;
+    const explicitTargetId = reshareTargetTabIdRef.current;
+    reshareTargetTabIdRef.current = null;
 
-      const parsedFiles = parseUploadedFolderFiles(fileList, folderName, pathBreadcrumb);
+    if (fileList && fileList.length > 0) {
+      const currentTabs = folderTabsRef.current;
+      const rawRel = fileList[0].webkitRelativePath || '';
+      const hasFolderSegment = rawRel.includes('/');
+      const detectedFolderName = hasFolderSegment
+        ? rawRel.split('/')[0] || 'Selected Folder'
+        : 'Selected Folder';
+      const detectedPath = `/Local Device/${detectedFolderName}`;
+
+      const explicitTarget = explicitTargetId
+        ? currentTabs.find((t) => t.id === explicitTargetId)
+        : undefined;
+      const matchedExisting =
+        explicitTarget ||
+        (hasFolderSegment
+          ? currentTabs.find(
+              (t) =>
+                !t.isSingleFileTab &&
+                (t.pathBreadcrumb === detectedPath ||
+                  t.lastKnownPath === detectedPath ||
+                  t.name === detectedFolderName)
+            )
+          : undefined);
+
+      const finalFolderName = hasFolderSegment
+        ? detectedFolderName
+        : matchedExisting?.name || detectedFolderName;
+      const finalPath = matchedExisting?.pathBreadcrumb || `/Local Device/${finalFolderName}`;
+
+      const parsedFiles = parseUploadedFolderFiles(fileList, finalFolderName, finalPath);
+      if (matchedExisting) {
+        matchedExisting.files.forEach((f) => rawFileMapRef.current.delete(f.id));
+      }
       for (let i = 0; i < fileList.length; i++) {
         const f = fileList[i];
-        const relPath = f.webkitRelativePath ? f.webkitRelativePath : `${folderName}/${f.name}`;
-        const fileId = `${folderName}__${relPath}__${f.size}`;
+        const relPath = f.webkitRelativePath ? f.webkitRelativePath : `${finalFolderName}/${f.name}`;
+        const fileId = `${finalFolderName}__${relPath}__${f.size}`;
         rawFileMapRef.current.set(fileId, f);
       }
 
-      if (targetTabId && folderTabs.some((t) => t.id === targetTabId)) {
-        const updated = folderTabs.map((t) =>
-          t.id === targetTabId
+      if (matchedExisting) {
+        const updated = currentTabs.map((t) =>
+          t.id === matchedExisting.id
             ? {
                 ...t,
-                name: folderName,
-                pathBreadcrumb,
+                name: finalFolderName,
+                sourceType: 'local_path' as const,
+                dirHandle: undefined,
+                pathBreadcrumb: finalPath,
                 files: parsedFiles,
                 missingCount: 0,
                 accessState: 'granted' as const,
-                lastKnownPath: pathBreadcrumb,
+                lastKnownPath: finalPath,
               }
             : t
         );
         setFolderTabs(updated);
         saveFolderTabs(updated);
-        setActiveTabId(targetTabId);
+        setActiveTabId(matchedExisting.id);
+        setExplorerInfoNotice(`Permission re-granted for "${finalFolderName}".`);
       } else {
         const newTabId = `tab-folder-${Date.now()}`;
         const newTab: ExplorerFolderTab = {
           id: newTabId,
-          name: folderName,
+          name: finalFolderName,
           iconType: 'folder',
           sourceType: 'local_path',
-          pathBreadcrumb,
+          pathBreadcrumb: finalPath,
           files: parsedFiles,
           missingCount: 0,
           accessState: 'granted',
-          lastKnownPath: pathBreadcrumb,
+          lastKnownPath: finalPath,
         };
 
-        const updated = [...folderTabs, newTab];
+        const updated = [...currentTabs, newTab];
         setFolderTabs(updated);
         saveFolderTabs(updated);
         setActiveTabId(newTabId);
@@ -418,9 +553,11 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   };
 
   // Add Individual File tab handler (prefers showOpenFilePicker for persistent FileHandle when supported)
-  const handleAddNewFile = async () => {
+  const handleAddNewFile = async (explicitTargetTabId?: string) => {
     setShowAddTabMenu(false);
     setExplorerBannerError(null);
+    reshareTargetTabIdRef.current = explicitTargetTabId || null;
+
     if (typeof window !== 'undefined' && 'showOpenFilePicker' in window) {
       try {
         // @ts-expect-error showOpenFilePicker
@@ -442,7 +579,12 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           const file = await fh.getFile();
           const targetTabId = reshareTargetTabIdRef.current;
           reshareTargetTabIdRef.current = null;
-          const tabId = targetTabId || `tab-file-${Date.now()}`;
+          const currentTabs = folderTabsRef.current;
+          const filePathBreadcrumb = `/Local Device/${file.name}`;
+          const existingMatch =
+            (targetTabId ? currentTabs.find((t) => t.id === targetTabId) : undefined) ||
+            (await findMatchingSingleFileTab(currentTabs, file.name, filePathBreadcrumb, fh));
+          const tabId = existingMatch ? existingMatch.id : `tab-file-${Date.now()}`;
           await saveSingleFileHandle(tabId, fh);
 
           const ext = extractFileExtension(file.name);
@@ -452,15 +594,15 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
             extension: ext,
             sizeBytes: file.size,
             lastModified: file.lastModified,
-            pathBreadcrumb: `/Local Device/${file.name}`,
+            pathBreadcrumb: filePathBreadcrumb,
             sourceType: 'local_handle',
             fileHandle: fh,
             isMissing: false,
           };
 
-          if (targetTabId && folderTabs.some((t) => t.id === targetTabId)) {
-            const updated = folderTabs.map((t) =>
-              t.id === targetTabId
+          if (existingMatch) {
+            const updated = currentTabs.map((t) =>
+              t.id === existingMatch.id
                 ? {
                     ...t,
                     name: file.name,
@@ -478,7 +620,8 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
             );
             setFolderTabs(updated);
             saveFolderTabs(updated);
-            setActiveTabId(targetTabId);
+            setActiveTabId(existingMatch.id);
+            setExplorerInfoNotice(`Permission re-granted for "${file.name}".`);
           } else {
             const newTab: ExplorerFolderTab = {
               id: tabId,
@@ -493,7 +636,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
               fileName: file.name,
               lastKnownPath: item.pathBreadcrumb,
             };
-            const updated = [...folderTabs, newTab];
+            const updated = [...currentTabs, newTab];
             setFolderTabs(updated);
             saveFolderTabs(updated);
             onOpenFile(item, file);
@@ -502,7 +645,10 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           return;
         }
       } catch (err: unknown) {
-        if ((err as Error)?.name === 'AbortError') return;
+        if ((err as Error)?.name === 'AbortError') {
+          reshareTargetTabIdRef.current = null;
+          return;
+        }
         console.warn('showOpenFilePicker failed, falling back to input:', err);
       }
     }
@@ -511,13 +657,26 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const targetTabId = reshareTargetTabIdRef.current;
+    reshareTargetTabIdRef.current = null;
+
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       const ext = extractFileExtension(file.name);
-      const targetTabId = reshareTargetTabIdRef.current;
-      reshareTargetTabIdRef.current = null;
-      const tabId = targetTabId || `tab-file-${Date.now()}`;
+      const currentTabs = folderTabsRef.current;
+      const pathBreadcrumb = `/Local Device/${file.name}`;
+      const existingMatch =
+        (targetTabId ? currentTabs.find((t) => t.id === targetTabId) : undefined) ||
+        currentTabs.find(
+          (t) =>
+            t.isSingleFileTab &&
+            (t.pathBreadcrumb === pathBreadcrumb || t.fileName === file.name || t.name === file.name)
+        );
+      const tabId = existingMatch ? existingMatch.id : `tab-file-${Date.now()}`;
       const itemId = `${tabId}__${file.name}`;
+      if (existingMatch) {
+        existingMatch.files.forEach((f) => rawFileMapRef.current.delete(f.id));
+      }
       rawFileMapRef.current.set(itemId, file);
 
       const item: ExplorerFileItem = {
@@ -526,18 +685,19 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         extension: ext,
         sizeBytes: file.size,
         lastModified: file.lastModified,
-        pathBreadcrumb: `/Local Device/${file.name}`,
+        pathBreadcrumb,
         sourceType: 'local_path',
         isMissing: false,
       };
 
-      if (targetTabId && folderTabs.some((t) => t.id === targetTabId)) {
-        const updated = folderTabs.map((t) =>
-          t.id === targetTabId
+      if (existingMatch) {
+        const updated = currentTabs.map((t) =>
+          t.id === existingMatch.id
             ? {
                 ...t,
                 name: file.name,
                 iconType: 'file' as const,
+                sourceType: 'local_path' as const,
                 fileName: file.name,
                 pathBreadcrumb: item.pathBreadcrumb,
                 files: [item],
@@ -550,7 +710,8 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         );
         setFolderTabs(updated);
         saveFolderTabs(updated);
-        setActiveTabId(targetTabId);
+        setActiveTabId(existingMatch.id);
+        setExplorerInfoNotice(`Permission re-granted for "${file.name}".`);
       } else {
         const newTab: ExplorerFolderTab = {
           id: tabId,
@@ -565,7 +726,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           fileName: file.name,
           lastKnownPath: item.pathBreadcrumb,
         };
-        const updated = [...folderTabs, newTab];
+        const updated = [...currentTabs, newTab];
         setFolderTabs(updated);
         saveFolderTabs(updated);
         onOpenFile(item, file);
@@ -575,7 +736,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     e.target.value = '';
   };
 
-  // Pin subfolder directly as tab from ClassicFileExplorerModal
+  // Pin subfolder directly as tab from ClassicFileExplorerModal (deduplicated)
   const handlePinSubfolderTab = async (folder: {
     name: string;
     pathBreadcrumb: string;
@@ -583,6 +744,38 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
     dirHandle?: FileSystemDirectoryHandle;
     files: ExplorerFileItem[];
   }) => {
+    const currentTabs = folderTabsRef.current;
+    const existing = await findMatchingFolderTab(
+      currentTabs,
+      folder.name,
+      folder.pathBreadcrumb,
+      folder.dirHandle
+    );
+
+    if (existing && existing.pathBreadcrumb === folder.pathBreadcrumb) {
+      if (folder.sourceType === 'local_handle' && folder.dirHandle) {
+        await saveDirectoryHandle(existing.id, folder.dirHandle);
+      }
+      const updated = currentTabs.map((t) =>
+        t.id === existing.id
+          ? {
+              ...t,
+              sourceType: folder.sourceType,
+              dirHandle: folder.dirHandle,
+              accessState: 'granted' as const,
+              files: folder.files,
+              missingCount: folder.files.filter((f) => f.isMissing).length,
+            }
+          : t
+      );
+      setFolderTabs(updated);
+      saveFolderTabs(updated);
+      setActiveTabId(existing.id);
+      setClassicSelectedTabId(null);
+      setShowClassicExplorer(false);
+      return;
+    }
+
     const newTabId = `tab-pin-${folder.sourceType}-${Date.now()}`;
     if (folder.sourceType === 'local_handle' && folder.dirHandle) {
       await saveDirectoryHandle(newTabId, folder.dirHandle);
@@ -601,7 +794,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       missingCount: folder.files.filter((f) => f.isMissing).length,
     };
 
-    const updated = [...folderTabs, newTab];
+    const updated = [...currentTabs, newTab];
     setFolderTabs(updated);
     saveFolderTabs(updated);
     setActiveTabId(newTabId);
@@ -700,7 +893,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
             fileHandle: savedFh,
             isMissing: false,
           };
-          const updated = folderTabs.map((t) =>
+          const updated = folderTabsRef.current.map((t) =>
             t.id === tab.id
               ? {
                   ...t,
@@ -716,8 +909,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           return;
         } catch {}
       }
-      reshareTargetTabIdRef.current = tab.id;
-      await handleAddNewFile();
+      await handleAddNewFile(tab.id);
       return;
     }
 
@@ -729,7 +921,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
           tab.pathBreadcrumb,
           tab.files
         );
-        const updated = folderTabs.map((t) =>
+        const updated = folderTabsRef.current.map((t) =>
           t.id === tab.id
             ? {
                 ...t,
@@ -754,9 +946,9 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         });
         await saveDirectoryHandle(tab.id, dirHandle);
         const pathBreadcrumb = `/Local Device/${dirHandle.name}`;
-        const files = await scanDirectoryFiles(dirHandle, pathBreadcrumb);
+        const files = await scanDirectoryFiles(dirHandle, pathBreadcrumb, tab.files);
 
-        const updated = folderTabs.map((t) =>
+        const updated = folderTabsRef.current.map((t) =>
           t.id === tab.id
             ? {
                 ...t,
@@ -1018,6 +1210,10 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         }}
         onPinSubfolderTab={(folder) => void handlePinSubfolderTab(folder)}
         onRefreshExplorer={() => void rehydrateExplorerState(folderTabs)}
+        suggestedSaveName={activeFileContext?.name}
+        onSaveToDirectory={onSaveToDirectory}
+        onDownloadFallback={onDownloadFallback}
+        onShareFallback={onShareFallback}
       />
 
       {missingFilesFolder && (
