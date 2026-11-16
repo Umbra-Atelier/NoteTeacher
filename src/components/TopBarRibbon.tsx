@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import {
   FileText,
@@ -219,6 +219,15 @@ interface TopBarRibbonProps {
   ) => Promise<void>;
   onDownloadFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
   onShareFallback?: (fileName: string, saveMode: SaveAsMode) => Promise<void>;
+
+  // Creator Info & Onboarding Tour button
+  onOpenCreatorInfo?: () => void;
+  isCreatorInfoOpen?: boolean;
+  creatorInfoJustLanded?: boolean;
+
+  // Mode bar collapse toggle
+  isModeBarCollapsed?: boolean;
+  onToggleModeBarCollapsed?: () => void;
 }
 
 export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
@@ -320,6 +329,11 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   onSaveToDirectory,
   onDownloadFallback,
   onShareFallback,
+  onOpenCreatorInfo,
+  isCreatorInfoOpen = false,
+  creatorInfoJustLanded = false,
+  isModeBarCollapsed: controlledModeBarCollapsed,
+  onToggleModeBarCollapsed,
 }) => {
   // Fullscreen toggle state synced with browser fullscreen events (standard + WebKit Safari)
   const [isFullscreen, setIsFullscreen] = useState<boolean>(() => {
@@ -456,42 +470,50 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   const presenterMenuBtnRef = useRef<HTMLButtonElement>(null);
   const templateMenuBtnRef = useRef<HTMLButtonElement>(null);
 
-  // Responsive Row 1 Mode Bar wrapping detection
-  const row1Ref = useRef<HTMLDivElement>(null);
-  const fileGroupRef = useRef<HTMLDivElement>(null);
-  const modeBarRef = useRef<HTMLDivElement>(null);
-  const rightActionsRef = useRef<HTMLDivElement>(null);
-  const [isModeBarWrapped, setIsModeBarWrapped] = useState(false);
+  // Collapsible Mode Select Bar animation state
+  const [internalModeBarCollapsed, setInternalModeBarCollapsed] = useState(false);
+  const isModeBarCollapsed = controlledModeBarCollapsed ?? internalModeBarCollapsed;
+  const [isModeBarAnimating, setIsModeBarAnimating] = useState(false);
+  const modeBarAnimTimerRef = useRef<number | null>(null);
+  const prevModeBarCollapsedRef = useRef(isModeBarCollapsed);
 
-  const measureRow1Fit = useCallback(() => {
-    const rowEl = row1Ref.current;
-    const fileEl = fileGroupRef.current;
-    const modeEl = modeBarRef.current;
-    const rightEl = rightActionsRef.current;
-    if (!rowEl || !fileEl || !modeEl || !rightEl) return;
+  useEffect(() => {
+    if (prevModeBarCollapsedRef.current !== isModeBarCollapsed) {
+      prevModeBarCollapsedRef.current = isModeBarCollapsed;
+      setIsModeBarAnimating(true);
+      if (modeBarAnimTimerRef.current !== null) {
+        window.clearTimeout(modeBarAnimTimerRef.current);
+      }
+      modeBarAnimTimerRef.current = window.setTimeout(() => {
+        setIsModeBarAnimating(false);
+        modeBarAnimTimerRef.current = null;
+      }, 450);
+    }
+  }, [isModeBarCollapsed]);
 
-    const availableWidth = rowEl.clientWidth - 24;
-    if (availableWidth <= 0) return;
-
-    const fileWidth = fileEl.getBoundingClientRect().width;
-    const rightWidth = rightEl.getBoundingClientRect().width;
-
-    const modeChildren = Array.from(modeEl.children) as HTMLElement[];
-    const buttonsTotalWidth = modeChildren.reduce(
-      (sum, child) => sum + child.getBoundingClientRect().width,
-      0
-    );
-    const modeSingleRowWidth =
-      buttonsTotalWidth + Math.max(0, modeChildren.length - 1) * 4 + 8;
-
-    const requiredWidth = fileWidth + modeSingleRowWidth + rightWidth + 24;
-
-    setIsModeBarWrapped((prev) => {
-      if (!prev && requiredWidth > availableWidth) return true;
-      if (prev && requiredWidth + 16 <= availableWidth) return false;
-      return prev;
-    });
+  useEffect(() => {
+    return () => {
+      if (modeBarAnimTimerRef.current !== null) {
+        window.clearTimeout(modeBarAnimTimerRef.current);
+      }
+    };
   }, []);
+
+  const handleToggleModeBarCollapsed = () => {
+    setIsModeBarAnimating(true);
+    if (modeBarAnimTimerRef.current !== null) {
+      window.clearTimeout(modeBarAnimTimerRef.current);
+    }
+    modeBarAnimTimerRef.current = window.setTimeout(() => {
+      setIsModeBarAnimating(false);
+      modeBarAnimTimerRef.current = null;
+    }, 450);
+    if (onToggleModeBarCollapsed) {
+      onToggleModeBarCollapsed();
+    } else {
+      setInternalModeBarCollapsed((prev) => !prev);
+    }
+  };
 
   const updateActivePaletteOrColor = (hex: string) => {
     onSetCurrentColor(hex);
@@ -559,24 +581,6 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     } catch {}
     return ['drawing', 'calculator', 'graphing', 'geometric', 'dictate', 'edit', 'presenter', 'touch_controls'];
   });
-
-  useEffect(() => {
-    measureRow1Fit();
-    const rowEl = row1Ref.current;
-    let observer: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== 'undefined' && rowEl) {
-      observer = new ResizeObserver(() => {
-        measureRow1Fit();
-      });
-      observer.observe(rowEl);
-      if (rightActionsRef.current) observer.observe(rightActionsRef.current);
-    }
-    window.addEventListener('resize', measureRow1Fit);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', measureRow1Fit);
-    };
-  }, [measureRow1Fit, modeOrder, presenterMode, currentTemplate]);
 
   const [draggedMode, setDraggedMode] = useState<AppMode | null>(null);
   const [dragOverMode, setDragOverMode] = useState<AppMode | null>(null);
@@ -677,7 +681,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
 
   // Shared Rainbow Slider, Color Tuner & Homescreen Palette Bar (used in both Drawing and Geometric tabs)
   const renderColorAndPaletteControls = () => (
-    <>
+    <div data-tour-id="color-palette" className="flex items-center gap-3 flex-wrap">
       {/* ========================================================== */}
       {/* RAINBOW SLIDER & COLOR TUNER                               */}
       {/* ========================================================== */}
@@ -962,7 +966,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
           </div>
         )}
       </div>
-    </>
+    </div>
   );
 
   // Shared Eraser sub-controls (reused across Edit, Drawing, Geometric, and Dictate tabs)
@@ -1069,18 +1073,16 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
 
   return (
     <header className="sticky top-0 z-[100] w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-xs select-none overscroll-none touch-pan-x">
-      {/* ROW 1: TOP BAR (File Button + Modes + Global Actions; Mode Bar wraps to 2nd line on narrow screens) */}
-      <div
-        ref={row1Ref}
-        className="flex flex-wrap items-center justify-between px-3 py-1.5 gap-x-2 gap-y-1.5 border-b border-slate-100 dark:border-slate-800/80"
-      >
+      {/* ROW 1: PERSISTENT TOP UTILITY BAR (File, Undo/Redo, Laser/Spotlight, Paper Type, Save, Brightness, Fullscreen, Info — NEVER collapses) */}
+      <div className="relative z-20 flex flex-wrap items-center justify-between px-3 py-1.5 gap-x-2 gap-y-1.5 bg-white/95 dark:bg-slate-900/95 border-b border-slate-100 dark:border-slate-800/80">
         {/* ============================================================== */}
         {/* FILE BUTTON (Opens File & Page Manager Dialog)                 */}
         {/* ============================================================== */}
-        <div ref={fileGroupRef} className="order-1 flex items-center shrink-0">
+        <div className="order-1 flex items-center shrink-0">
           <div className="relative">
             <button
               type="button"
+              data-tour-id="file-btn"
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
                 if (!showFileModal) {
@@ -1126,132 +1128,8 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
           />
         </div>
 
-        {/* ============================================================== */}
-        {/* MODE SELECTOR BUTTONS (Wraps to second line on smaller screens) */}
-        {/* ============================================================== */}
-        <div
-          ref={modeBarRef}
-          className={`flex items-center gap-1 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-xl border border-slate-200/80 dark:border-slate-700 select-none ${
-            isModeBarWrapped
-              ? 'order-3 basis-full w-full flex-wrap justify-start'
-              : 'order-2 shrink-0'
-          }`}
-          title="Hold down and drag a mode left or right to reorder modes"
-        >
-          {modeOrder.map((mId, index) => {
-            const m = ALL_MODES[mId];
-            if (!m) return null;
-            const isActive = mode === m.id;
-            const isBeingDragged = draggedMode === m.id;
-            const isOver = dragOverMode === m.id;
-            const isHolding = holdingModeId === m.id;
-
-            return (
-              <div
-                key={m.id}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('text/plain', m.id);
-                  setDraggedMode(m.id);
-                }}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  if (draggedMode && draggedMode !== m.id) {
-                    setDragOverMode(m.id);
-                  }
-                }}
-                onDragLeave={() => {
-                  if (dragOverMode === m.id) setDragOverMode(null);
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const source = e.dataTransfer.getData('text/plain') as AppMode;
-                  if (source) {
-                    handleReorderMode(source, m.id);
-                  }
-                  setDraggedMode(null);
-                  setDragOverMode(null);
-                  setHoldingModeId(null);
-                }}
-                onDragEnd={() => {
-                  setDraggedMode(null);
-                  setDragOverMode(null);
-                  setHoldingModeId(null);
-                }}
-                onMouseDown={() => handleModeHoldStart(m.id)}
-                onMouseUp={handleModeHoldEnd}
-                onTouchStart={() => handleModeHoldStart(m.id)}
-                onTouchEnd={handleModeHoldEnd}
-                className={`relative flex items-center shrink-0 transition-all ${
-                  isOver ? 'scale-105 border-b-2 border-blue-500' : ''
-                } ${
-                  isBeingDragged || isHolding
-                    ? 'opacity-80 scale-95 shadow-md ring-2 ring-blue-500 rounded-lg'
-                    : ''
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!isHolding && !draggedMode) {
-                      onSetMode(m.id);
-                    }
-                  }}
-                  title="Click to select mode. Hold down or drag left/right to move compared to others."
-                  className={`flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-grab active:cursor-grabbing ${
-                    isActive
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs ring-1 ring-slate-200 dark:ring-slate-700'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <m.icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? m.color : 'text-slate-400'}`} />
-                  <span>{m.label}</span>
-                </button>
-
-                {/* Micro shift buttons when held down */}
-                {isHolding && (
-                  <div className="absolute -bottom-5 left-1/2 -translate-x-1/2 flex items-center gap-0.5 bg-slate-900 text-white rounded px-1 py-0.5 shadow-lg z-50 text-[10px]">
-                    {index > 0 && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleShiftMode(m.id, 'left');
-                        }}
-                        className="hover:text-blue-400 px-0.5"
-                        title="Move left"
-                      >
-                        ◀
-                      </button>
-                    )}
-                    <span>Move</span>
-                    {index < modeOrder.length - 1 && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleShiftMode(m.id, 'right');
-                        }}
-                        className="hover:text-blue-400 px-0.5"
-                        title="Move right"
-                      >
-                        ▶
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Center + Right Actions (Undo/Redo, Overlays, Template, Quick Export, Theme) */}
-        <div
-          ref={rightActionsRef}
-          className={`ml-auto flex items-center justify-end gap-1.5 ${
-            isModeBarWrapped ? 'order-2 flex-wrap max-w-full' : 'order-3 shrink-0'
-          }`}
-        >
+        {/* Center + Right Actions (Undo/Redo, Overlays, Template, Quick Export, Theme, Fullscreen, Info) */}
+        <div className="order-2 ml-auto flex items-center justify-end gap-1.5 flex-wrap max-w-full">
           {/* Quick Undo / Redo */}
           <div className="flex items-center gap-1 text-slate-600 dark:text-slate-400 shrink-0">
             <button
@@ -1452,7 +1330,204 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
             >
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </button>
+
+            {/* Top-Right Circular Blue "i" Creator Info & Feedback Button */}
+            {onOpenCreatorInfo && (
+              <button
+                type="button"
+                onClick={onOpenCreatorInfo}
+                title="About NoteTeacher · Contact umbra atelier & Replay Tutorial"
+                aria-label="About NoteTeacher and creator contact info"
+                data-tour-id="creator-info-btn"
+                data-testid="creator-info-btn"
+                className={`w-7 h-7 rounded-full border-2 font-serif font-bold text-sm flex items-center justify-center transition-all shrink-0 cursor-pointer ${
+                  isCreatorInfoOpen
+                    ? 'bg-blue-600 border-blue-600 text-white shadow-sm'
+                    : 'border-blue-600 dark:border-blue-400 bg-blue-50 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400 hover:bg-blue-600 hover:text-white dark:hover:bg-blue-500 dark:hover:text-white'
+                } ${
+                  creatorInfoJustLanded
+                    ? 'ring-4 ring-blue-400/50 scale-110'
+                    : ''
+                }`}
+              >
+                i
+              </button>
+            )}
           </div>
+        </div>
+      </div>
+
+      {/* ROW 1.5: COLLAPSIBLE MODE SELECTOR BAR + ATTACHED BOTTOM ARROW TOGGLE */}
+      <div
+        data-tour-id="mode-bar-collapse-group"
+        className="relative z-10 flex flex-col"
+      >
+        {/* Sliding & Height-Collapsing Wrapper for Mode Select Bar */}
+        <div
+          data-testid="mode-bar-collapse-region"
+          aria-hidden={isModeBarCollapsed}
+          className={`grid transition-[grid-template-rows] duration-[420ms] ease-[cubic-bezier(0.25,0.85,0.3,1)] ${
+            isModeBarCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'
+          }`}
+        >
+          <div
+            className={`min-h-0 ${
+              isModeBarCollapsed || isModeBarAnimating ? 'overflow-hidden' : 'overflow-visible'
+            }`}
+          >
+            <div
+              data-testid="mode-bar-sliding-inner"
+              style={{
+                transform: isModeBarCollapsed ? 'translateY(-100%)' : 'translateY(0%)',
+                opacity: isModeBarCollapsed ? 0 : 1,
+                transition: 'transform 420ms cubic-bezier(0.25, 0.85, 0.3, 1), opacity 340ms ease',
+              }}
+              className={`px-3 py-1.5 bg-slate-50/75 dark:bg-slate-900/75 border-b border-slate-200/80 dark:border-slate-800 ${
+                isModeBarCollapsed ? 'pointer-events-none' : ''
+              }`}
+            >
+              <div
+                className="flex items-center gap-1 flex-wrap justify-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-xl border border-slate-200/80 dark:border-slate-700 select-none w-fit max-w-full mx-auto"
+                title="Hold down and drag a mode left or right to reorder modes"
+              >
+                {modeOrder.map((mId, index) => {
+                  const m = ALL_MODES[mId];
+                  if (!m) return null;
+                  const isActive = mode === m.id;
+                  const isBeingDragged = draggedMode === m.id;
+                  const isOver = dragOverMode === m.id;
+                  const isHolding = holdingModeId === m.id;
+
+                  return (
+                    <div
+                      key={m.id}
+                      draggable={!isModeBarCollapsed}
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData('text/plain', m.id);
+                        setDraggedMode(m.id);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        if (draggedMode && draggedMode !== m.id) {
+                          setDragOverMode(m.id);
+                        }
+                      }}
+                      onDragLeave={() => {
+                        if (dragOverMode === m.id) setDragOverMode(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const source = e.dataTransfer.getData('text/plain') as AppMode;
+                        if (source) {
+                          handleReorderMode(source, m.id);
+                        }
+                        setDraggedMode(null);
+                        setDragOverMode(null);
+                        setHoldingModeId(null);
+                      }}
+                      onDragEnd={() => {
+                        setDraggedMode(null);
+                        setDragOverMode(null);
+                        setHoldingModeId(null);
+                      }}
+                      onMouseDown={() => handleModeHoldStart(m.id)}
+                      onMouseUp={handleModeHoldEnd}
+                      onTouchStart={() => handleModeHoldStart(m.id)}
+                      onTouchEnd={handleModeHoldEnd}
+                      className={`relative flex items-center shrink-0 transition-all ${
+                        isOver ? 'scale-105 border-b-2 border-blue-500' : ''
+                      } ${
+                        isBeingDragged || isHolding
+                          ? 'opacity-80 scale-95 shadow-md ring-2 ring-blue-500 rounded-lg'
+                          : ''
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        tabIndex={isModeBarCollapsed ? -1 : 0}
+                        onClick={() => {
+                          if (!isHolding && !draggedMode) {
+                            onSetMode(m.id);
+                          }
+                        }}
+                        title="Click to select mode. Hold down or drag left/right to move compared to others."
+                        className={`flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-grab active:cursor-grabbing ${
+                          isActive
+                            ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs ring-1 ring-slate-200 dark:ring-slate-700'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                        }`}
+                      >
+                        <m.icon
+                          className={`w-3.5 h-3.5 shrink-0 ${isActive ? m.color : 'text-slate-400'}`}
+                        />
+                        <span>{m.label}</span>
+                      </button>
+
+                      {/* Micro shift buttons when held down */}
+                      {isHolding && (
+                        <div className="absolute -bottom-5 left-1/2 -translate-x-1/2 flex items-center gap-0.5 bg-slate-900 text-white rounded px-1 py-0.5 shadow-lg z-50 text-[10px]">
+                          {index > 0 && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleShiftMode(m.id, 'left');
+                              }}
+                              className="hover:text-blue-400 px-0.5"
+                              title="Move left"
+                            >
+                              ◀
+                            </button>
+                          )}
+                          <span>Move</span>
+                          {index < modeOrder.length - 1 && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleShiftMode(m.id, 'right');
+                              }}
+                              className="hover:text-blue-400 px-0.5"
+                              title="Move right"
+                            >
+                              ▶
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Arrow Collapse Toggle flush against bottom edge of the Mode Select Bar */}
+        <div className="relative flex justify-center h-[18px]">
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={handleToggleModeBarCollapsed}
+            aria-expanded={!isModeBarCollapsed}
+            aria-label={isModeBarCollapsed ? 'Expand mode select bar' : 'Collapse mode select bar'}
+            title={
+              isModeBarCollapsed
+                ? 'Expand Mode Select Bar'
+                : 'Collapse Mode Select Bar upward (keeps top bar and active mode options visible)'
+            }
+            data-testid="mode-bar-collapse-toggle"
+            data-tour-id="mode-bar-collapse-toggle"
+            className="dcg-do-not-blur -mt-px h-[19px] px-5 rounded-b-lg border-x border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/95 hover:bg-blue-50 dark:hover:bg-slate-700 hover:border-blue-300 dark:hover:border-blue-600 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 shadow-xs flex items-center justify-center transition-colors cursor-pointer"
+          >
+            <ChevronUp
+              data-testid="mode-bar-collapse-arrow"
+              style={{
+                transform: isModeBarCollapsed ? 'rotate(180deg)' : 'rotate(0deg)',
+              }}
+              className="w-3.5 h-3.5 transition-transform duration-[420ms] ease-[cubic-bezier(0.25,0.85,0.3,1)]"
+            />
+          </button>
         </div>
       </div>
 
@@ -1849,13 +1924,16 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
           document.body
         )}
 
-      {/* ROW 2: DYNAMIC RIBBON BAR BASED ON ACTIVE MODE */}
-      <div className="flex items-center px-4 py-2 gap-4 text-xs overflow-x-auto min-h-[52px]">
+      {/* ROW 2: DYNAMIC RIBBON BAR BASED ON ACTIVE MODE (Stays visible & slides upward when Mode Bar collapses) */}
+      <div
+        data-testid="mode-options-ribbon"
+        className="flex items-center px-4 pt-1 pb-2 gap-4 text-xs overflow-x-auto min-h-[48px]"
+      >
         {/* ============================================================== */}
         {/* EDIT MODE RIBBON (Cut, Copy, Paste, Delete + Notepad Eraser)   */}
         {/* ============================================================== */}
         {mode === 'edit' && (
-          <div className="flex items-center gap-4 flex-wrap w-full">
+          <div data-tour-id="edit-tools" className="flex items-center gap-4 flex-wrap w-full">
             {/* Clipboard and Delete Controls for Selected Items */}
             <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
               {/* Cut Button */}
@@ -2048,7 +2126,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         {/* PRESENTER MODE OPTIONS RIBBON                                  */}
         {/* ============================================================== */}
         {mode === 'presenter' && (
-          <div className="flex items-center gap-4 flex-wrap w-full text-xs">
+          <div data-tour-id="presenter-tools" className="flex items-center gap-4 flex-wrap w-full text-xs">
             {/* PRESENTATION MODE CHOICE: Dual View vs Multi-Screen */}
             <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
               <button
@@ -2201,7 +2279,8 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         {/* ============================================================== */}
         {mode === 'drawing' && (
           <div className="flex items-center gap-4 flex-wrap">
-            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
+            <div data-tour-id="drawing-tools" className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
               {[
                 { id: 'pencil', label: 'Pencil', icon: Pencil },
                 { id: 'pen', label: 'Pen', icon: Pen },
@@ -2256,6 +2335,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 </div>
               </>
             )}
+            </div>
 
             {renderColorAndPaletteControls()}
           </div>
@@ -2265,7 +2345,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         {/* CALCULATOR MODE RIBBON                                         */}
         {/* ============================================================== */}
         {mode === 'calculator' && (
-          <div className="flex items-center gap-4 flex-wrap">
+          <div data-tour-id="calculator-tools" className="flex items-center gap-4 flex-wrap">
             <button
               type="button"
               onClick={onAddCalculatorAtCenter}
@@ -2288,7 +2368,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         {/* GRAPHING (DESMOS) MODE RIBBON                                  */}
         {/* ============================================================== */}
         {mode === 'graphing' && (
-          <div className="flex items-center gap-4 flex-wrap">
+          <div data-tour-id="graphing-tools" className="flex items-center gap-4 flex-wrap">
             <button
               type="button"
               onClick={onAddDesmosBoxAtCenter}
@@ -2324,7 +2404,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         {/* GEOMETRIC MODE RIBBON                                          */}
         {/* ============================================================== */}
         {mode === 'geometric' && (
-          <div className="flex items-center gap-3 flex-wrap">
+          <div data-tour-id="geometric-tools" className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl">
               {[
                 { id: 'rect', label: 'Rectangle', icon: Square },
@@ -2555,7 +2635,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         {/* DICTATE MODE RIBBON                                            */}
         {/* ============================================================== */}
         {mode === 'dictate' && (
-          <div className="flex items-center gap-3 flex-wrap w-full">
+          <div data-tour-id="dictate-tools" className="flex items-center gap-3 flex-wrap w-full">
             <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl flex-wrap">
               <button
                 type="button"
@@ -2723,7 +2803,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
         {/* TOUCH CONTROLS MODE RIBBON                                     */}
         {/* ============================================================== */}
         {mode === 'touch_controls' && (
-          <div className="flex items-center gap-3 flex-wrap py-0.5">
+          <div data-tour-id="touch-controls" className="flex items-center gap-3 flex-wrap py-0.5">
             <span className="text-xs font-bold text-cyan-800 dark:text-cyan-300 uppercase tracking-wider shrink-0">
               Touch Strategy:
             </span>

@@ -743,15 +743,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const contactingPenIdsRef = useRef<Set<number>>(new Set());
   const lastStylusEventAtRef = useRef<number>(0);
   const lastProcessedPointerMoveRef = useRef<Event | null>(null);
+  const handledByNativeInkRef = useRef<WeakSet<Event>>(new WeakSet());
   const activeRecoveryWindowPointerIdRef = useRef<number | null>(null);
   const activeSmartStylusPointerIdRef = useRef<number | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
   const isDrawingRef = useRef<boolean>(false);
   const currentPointsRef = useRef<StrokePoint[]>([]);
-
-  // Active Drawing State
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [currentPoints, setCurrentPoints] = useState<StrokePoint[]>([]);
+  const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const renderedPointCountRef = useRef<number>(0);
+  const pendingLiveCanvasClearRef = useRef<boolean>(false);
+  const liveStrokeStreamTimerRef = useRef<number | null>(null);
+  const lastCommittedBridgeRef = useRef<{ pointerId: number; point: StrokePoint; time: number } | null>(null);
 
   // Active Shape Drag State
   const [shapeDragStart, setShapeDragStart] = useState<{ x: number; y: number } | null>(null);
@@ -973,17 +975,108 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   }, [activeSelectionProp]);
 
+  // Clear immediate-mode scratch canvas right after React commits the permanent SVG stroke (0-frame flicker)
+  const clearLiveCanvas = useCallback(() => {
+    const canvas = liveCanvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.restore();
+      }
+    }
+    renderedPointCountRef.current = 0;
+  }, []);
+
+  const ensureLiveCanvasSize = useCallback(() => {
+    const canvas = liveCanvasRef.current;
+    const layer = interactionLayerRef.current;
+    if (!canvas || !layer) return null;
+    const logicalW = Math.max(1, layer.clientWidth || 1000);
+    const logicalH = Math.max(1, layer.clientHeight || 1400);
+    const dpr = Math.min((typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1) * 1.5, 3);
+    const targetW = Math.round(logicalW * dpr);
+    const targetH = Math.round(logicalH * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+      renderedPointCountRef.current = 0;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return ctx;
+  }, []);
+
+  const drawIncrementalLivePoints = useCallback(
+    (pts: StrokePoint[], color: string, width: number) => {
+      const ctx = ensureLiveCanvasSize();
+      if (!ctx || pts.length === 0) return;
+
+      const startIdx = renderedPointCountRef.current;
+      if (startIdx >= pts.length) return;
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = width;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      if (startIdx === 0) {
+        const p0 = pts[0];
+        ctx.beginPath();
+        ctx.arc(p0.x, p0.y, Math.max(0.5, width / 2), 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (pts.length >= 2) {
+        const firstSeg = Math.max(1, startIdx);
+        ctx.beginPath();
+        if (firstSeg === 1) {
+          const p0 = pts[0];
+          const p1 = pts[1];
+          ctx.moveTo(p0.x, p0.y);
+          ctx.lineTo((p0.x + p1.x) / 2, (p0.y + p1.y) / 2);
+        } else {
+          const pPrev2 = pts[firstSeg - 2];
+          const pPrev1 = pts[firstSeg - 1];
+          ctx.moveTo((pPrev2.x + pPrev1.x) / 2, (pPrev2.y + pPrev1.y) / 2);
+        }
+
+        for (let i = Math.max(2, firstSeg); i < pts.length; i++) {
+          const p1 = pts[i - 1];
+          const p2 = pts[i];
+          ctx.quadraticCurveTo(p1.x, p1.y, (p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+        }
+        ctx.stroke();
+      }
+
+      ctx.restore();
+      renderedPointCountRef.current = pts.length;
+    },
+    [ensureLiveCanvasSize]
+  );
+
   // Clean interaction state when switching modes or pages
   useEffect(() => {
+    if (liveStrokeStreamTimerRef.current !== null) {
+      window.clearInterval(liveStrokeStreamTimerRef.current);
+      liveStrokeStreamTimerRef.current = null;
+    }
     isDrawingRef.current = false;
     currentPointsRef.current = [];
+    renderedPointCountRef.current = 0;
+    pendingLiveCanvasClearRef.current = false;
+    lastCommittedBridgeRef.current = null;
+    clearLiveCanvas();
     activePointerIdRef.current = null;
     activeRecoveryWindowPointerIdRef.current = null;
     isStylusDownRef.current = false;
     contactingPenIdsRef.current.clear();
     activeSmartStylusPointerIdRef.current = null;
-    setIsDrawing(false);
-    setCurrentPoints([]);
     setShapeDragStart(null);
     setShapeDragCurrent(null);
     setGraphDragStart(null);
@@ -1005,17 +1098,46 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     setPhotoCropClientCurrent(null);
     setAngleStep('idle');
     setAngleCenter(null);
-  }, [mode, pageId]);
+  }, [mode, pageId, clearLiveCanvas]);
 
-  const commitActiveDrawingStrokeRef = useRef<() => void>(() => {});
-  commitActiveDrawingStrokeRef.current = () => {
+  const stopLiveStrokeStream = useCallback(() => {
+    if (liveStrokeStreamTimerRef.current !== null) {
+      window.clearInterval(liveStrokeStreamTimerRef.current);
+      liveStrokeStreamTimerRef.current = null;
+    }
+  }, []);
+
+  const commitActiveDrawingStrokeRef = useRef<(preserveBridgeForPointerId?: number) => void>(() => {});
+  commitActiveDrawingStrokeRef.current = (preserveBridgeForPointerId?: number) => {
     if (!isDrawingRef.current) return;
-    const pts = [...currentPointsRef.current];
+    stopLiveStrokeStream();
+    const pts = currentPointsRef.current.slice();
     isDrawingRef.current = false;
     currentPointsRef.current = [];
-    setIsDrawing(false);
-    setCurrentPoints([]);
+    renderedPointCountRef.current = 0;
+
+    if (preserveBridgeForPointerId !== undefined && pts.length > 0) {
+      lastCommittedBridgeRef.current = {
+        pointerId: preserveBridgeForPointerId,
+        point: pts[pts.length - 1],
+        time: Date.now(),
+      };
+    } else {
+      lastCommittedBridgeRef.current = null;
+    }
+
+    if (lastLiveOverlaySentNonNullRef.current && onLiveOverlayChange && !isAudienceViewer) {
+      lastLiveOverlaySentNonNullRef.current = false;
+      liveOverlayThrottleRef.current = Date.now();
+      onLiveOverlayChange(null);
+    }
+
     if (pts.length >= 1) {
+      pendingLiveCanvasClearRef.current = true;
+      if (!isActivePage && onActivatePage) {
+        onActivatePage();
+      }
+      onColorUsed(currentColor);
       onAddStroke({
         id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         pageId,
@@ -1025,6 +1147,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         opacity: penType === 'highlighter' ? 0.35 : 1,
         points: pts,
       });
+      window.setTimeout(() => {
+        if (pendingLiveCanvasClearRef.current && !isDrawingRef.current) {
+          pendingLiveCanvasClearRef.current = false;
+          clearLiveCanvas();
+        }
+      }, 64);
+    } else {
+      clearLiveCanvas();
     }
   };
 
@@ -1060,12 +1190,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
     };
     window.addEventListener('pointerdown', trackPenDown, { capture: true, passive: true });
-    window.addEventListener('pointerup', resetStuckPointer, { capture: true, passive: true });
-    window.addEventListener('pointercancel', resetStuckPointer, { capture: true, passive: true });
+    window.addEventListener('pointerup', resetStuckPointer, { capture: false, passive: true });
+    window.addEventListener('pointercancel', resetStuckPointer, { capture: false, passive: true });
     return () => {
       window.removeEventListener('pointerdown', trackPenDown, { capture: true });
-      window.removeEventListener('pointerup', resetStuckPointer, { capture: true });
-      window.removeEventListener('pointercancel', resetStuckPointer, { capture: true });
+      window.removeEventListener('pointerup', resetStuckPointer, { capture: false });
+      window.removeEventListener('pointercancel', resetStuckPointer, { capture: false });
     };
   }, []);
 
@@ -1083,12 +1213,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   }, [isCircleEraseActive]);
 
-  // Throttled live in-progress overlay streaming to Audience Viewer tab
+  // Throttled live in-progress overlay streaming to Audience Viewer tab (non-stroke tools; drawing strokes stream directly via timer)
   useEffect(() => {
     if (isAudienceViewer || !onLiveOverlayChange) return;
 
-    const hasStroke =
-      isDrawing && mode === 'drawing' && penType !== 'eraser' && currentPoints.length > 1;
     const hasShape =
       mode === 'geometric' && shapeType !== 'angle' && !!shapeDragStart && !!shapeDragCurrent;
     const hasGraph = mode === 'graphing' && !!graphDragStart && !!graphDragCurrent;
@@ -1097,7 +1225,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     const hasDictatePreview =
       mode === 'dictate' && !!dictateDragStart && !!dictateDragCurrent;
 
-    if (!hasStroke && !hasShape && !hasGraph && !hasAngle && !hasDictatePreview) {
+    if (!hasShape && !hasGraph && !hasAngle && !hasDictatePreview) {
+      if (isDrawingRef.current) return;
       if (liveOverlayTimerRef.current) {
         window.clearTimeout(liveOverlayTimerRef.current);
         liveOverlayTimerRef.current = null;
@@ -1111,16 +1240,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
 
     const payload: LiveCanvasOverlay = {
-      stroke: hasStroke
-        ? {
-            pageId,
-            tool: penType,
-            color: currentColor,
-            width: strokeWidth,
-            opacity: penType === 'highlighter' ? 0.35 : 1,
-            points: currentPoints,
-          }
-        : null,
+      stroke: null,
       shape:
         hasShape && shapeDragStart && shapeDragCurrent
           ? {
@@ -1194,11 +1314,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     onLiveOverlayChange,
     pageId,
     mode,
-    penType,
-    isDrawing,
-    currentPoints,
     currentColor,
-    strokeWidth,
     shapeType,
     shapeDragStart,
     shapeDragCurrent,
@@ -1222,10 +1338,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     angleNegativeDirection,
   ]);
 
+  useLayoutEffect(() => {
+    if (pendingLiveCanvasClearRef.current) {
+      pendingLiveCanvasClearRef.current = false;
+      clearLiveCanvas();
+    }
+  }, [pageStrokes, clearLiveCanvas]);
+
   useEffect(() => {
     return () => {
       if (liveOverlayTimerRef.current) {
         window.clearTimeout(liveOverlayTimerRef.current);
+      }
+      if (liveStrokeStreamTimerRef.current !== null) {
+        window.clearInterval(liveStrokeStreamTimerRef.current);
       }
     };
   }, []);
@@ -1364,8 +1490,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         e.preventDefault();
         isPinchingRef.current = true;
 
-        setIsDrawing(false);
-        setCurrentPoints([]);
+        if (isDrawingRef.current) {
+          isDrawingRef.current = false;
+          currentPointsRef.current = [];
+          stopLiveStrokeStream();
+          clearLiveCanvas();
+        }
         setShapeDragStart(null);
         setShapeDragCurrent(null);
         setGraphDragStart(null);
@@ -1738,14 +1868,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
       // 5. Draw Pen Strokes
       for (const strk of pageStrokes) {
-        if (strk.isGhosted || !strk.points || strk.points.length < 2) continue;
+        if (strk.isGhosted || !strk.points || strk.points.length < 1) continue;
         ctx.save();
         ctx.strokeStyle = strk.color;
+        ctx.fillStyle = strk.color;
         ctx.lineWidth = strk.width * activeZoomScale;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         if (strk.tool === 'highlighter') {
           ctx.globalAlpha = 0.45;
+        }
+        if (strk.points.length === 1) {
+          const p0 = strk.points[0];
+          ctx.beginPath();
+          ctx.arc(
+            (p0.x - stageCropLeft) * activeZoomScale,
+            (p0.y - stageCropTop) * activeZoomScale,
+            Math.max(0.5, (strk.width * activeZoomScale) / 2),
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+          ctx.restore();
+          continue;
         }
 
         ctx.beginPath();
@@ -1793,18 +1938,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   };
 
-  // Helper: check if a native or React pen PointerEvent is actively touching the surface
+  // Helper: check if a native or React pen PointerEvent is physically contacting the surface (vs hovering)
   const isPenEventContacting = useCallback(
     (ev: Pick<PointerEvent, 'pointerType' | 'pointerId' | 'buttons' | 'pressure'> & {
       getCoalescedEvents?: () => PointerEvent[];
     }): boolean => {
       if (ev.pointerType !== 'pen') return false;
-      if (contactingPenIdsRef.current.has(ev.pointerId)) return true;
-      if ((ev.buttons & 1) !== 0 || ev.pressure > 0.001) return true;
+      if ((ev.buttons & 1) !== 0 || ev.pressure > 0) return true;
       if (typeof ev.getCoalescedEvents === 'function') {
         try {
           const coalesced = ev.getCoalescedEvents();
-          if (coalesced && coalesced.some((ce) => (ce.buttons & 1) !== 0 || ce.pressure > 0.001)) {
+          if (coalesced && coalesced.some((ce) => (ce.buttons & 1) !== 0 || ce.pressure > 0)) {
             return true;
           }
         } catch {
@@ -1817,43 +1961,49 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   );
 
   // Stylus Detection & Palm Rejection Gate (Active Pen vs Smart Tip Passive)
-  const isPointerAccepted = (
-    e: Pick<PointerEvent, 'pointerType' | 'pointerId' | 'width' | 'height' | 'pressure' | 'buttons'>,
-    phase: 'down' | 'move' | 'up'
-  ): boolean => {
-    if (isAudienceViewer) return false;
-    if (e.pointerType === 'pen') return true;
-    if (e.pointerType === 'mouse') return stylusConfig?.allowMouseInput ?? true;
-    if (e.pointerType === 'touch') {
-      // In Active Pen mode, ONLY the pen (or optional mouse) may draw, erase, or create elements.
-      // Capacitive touches are handled by mode-specific gestures (2-finger pinch/pan) & element controls.
-      if (stylusConfig?.detectionMode !== 'smart_tip') {
+  const isPointerAccepted = useCallback(
+    (
+      e: Pick<PointerEvent, 'pointerType' | 'pointerId' | 'width' | 'height' | 'pressure' | 'buttons'>,
+      phase: 'down' | 'move' | 'up'
+    ): boolean => {
+      if (isAudienceViewer) return false;
+      if (e.pointerType === 'pen') return true;
+      if (e.pointerType === 'mouse') return stylusConfig?.allowMouseInput ?? true;
+      if (e.pointerType === 'touch') {
+        // In Active Pen mode, ONLY the pen (or optional mouse) may draw, erase, or create elements.
+        // Capacitive touches are handled by mode-specific gestures (2-finger pinch/pan) & element controls.
+        if (stylusConfig?.detectionMode !== 'smart_tip') {
+          return false;
+        }
+        if (touchInputMode === 'two_finger') return true;
+        if (phase !== 'down' && activeSmartStylusPointerIdRef.current === e.pointerId) {
+          return true;
+        }
+        // Note: touch pointermove events never hover (every touch move is physical contact) and usually have e.buttons === 0
+        if (phase === 'down' || (phase === 'move' && !isDrawingRef.current)) {
+          const contactSize = Math.max(e.width || 0, e.height || 0);
+          const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
+          const maxTip = stylusConfig.maxTipSizePx ?? 14;
+          const accepted =
+            contactSize <= maxTip || (hasPenPressure && contactSize <= maxTip + 6);
+          if (accepted) {
+            activeSmartStylusPointerIdRef.current = e.pointerId;
+            isStylusDownRef.current = true;
+          }
+          return accepted;
+        }
         return false;
       }
-      if (touchInputMode === 'two_finger') return true;
-      if (phase !== 'down' && activeSmartStylusPointerIdRef.current === e.pointerId) {
-        return true;
-      }
-      // Note: touch pointermove events never hover (every touch move is physical contact) and usually have e.buttons === 0
-      if (phase === 'down' || (phase === 'move' && !isDrawingRef.current)) {
-        const contactSize = Math.max(e.width || 0, e.height || 0);
-        const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
-        const maxTip = stylusConfig.maxTipSizePx ?? 14;
-        const accepted =
-          contactSize <= maxTip || (hasPenPressure && contactSize <= maxTip + 6);
-        if (accepted) {
-          activeSmartStylusPointerIdRef.current = e.pointerId;
-          isStylusDownRef.current = true;
-        }
-        return accepted;
-      }
       return false;
-    }
-    return false;
-  };
+    },
+    [isAudienceViewer, stylusConfig, touchInputMode]
+  );
 
-  // Pointer Down
+  // Pointer Down (React fallback for non-inking modes; inking fast-path runs natively on interactionLayerRef)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (handledByNativeInkRef.current.has(e.nativeEvent)) {
+      return;
+    }
     if (e.pointerType === 'pen') {
       contactingPenIdsRef.current.add(e.pointerId);
       lastStylusEventAtRef.current = Date.now();
@@ -2003,26 +2153,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    // DRAWING MODE
+    // DRAWING MODE fallback (if somehow invoked outside native DOM listener)
     if (mode === 'drawing') {
-      // If a previous stroke's pointerup was missed by the browser, commit it before starting the new word/stroke
-      if (isDrawingRef.current && currentPointsRef.current.length > 0) {
-        onAddStroke({
-          id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          pageId,
-          tool: penType,
-          color: currentColor,
-          width: strokeWidth,
-          opacity: penType === 'highlighter' ? 0.35 : 1,
-          points: currentPointsRef.current,
-        });
-      }
-      const initialPts: StrokePoint[] = [{ x, y, pressure }];
-      isDrawingRef.current = true;
-      currentPointsRef.current = initialPts;
-      setIsDrawing(true);
-      setCurrentPoints(initialPts);
-      onColorUsed(currentColor);
+      startImmediateStroke(
+        e.pointerId,
+        e.pointerType,
+        e.clientX,
+        e.clientY,
+        pressure,
+        null,
+        e.currentTarget,
+        false
+      );
       return;
     }
 
@@ -2097,8 +2239,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
   };
 
-  // Mid-stroke recovery & drawing continuation helper (shared by React onPointerMove & window capture recovery)
-  const beginMidStrokeRecovery = useCallback(
+  // Immediate-mode stroke initiator (zero React setState during stroke; renders directly on 2D <canvas>)
+  const startImmediateStroke = useCallback(
     (
       pointerId: number,
       pointerType: string,
@@ -2109,18 +2251,6 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       captureTarget: HTMLElement | null,
       markWindowRecovery: boolean
     ) => {
-      if (!isActivePage && onActivatePage) {
-        onActivatePage();
-      }
-      setSelectedGridShapeId(null);
-      setSelectedGraphId(null);
-      setSelectedCalcId(null);
-      setSelectedImageId(null);
-      if (editingDictateBoxId) {
-        onStopManualEditDictateBox?.();
-      }
-      onClickOutsideDictateBox?.();
-
       if (pointerType === 'pen') {
         contactingPenIdsRef.current.add(pointerId);
         lastStylusEventAtRef.current = Date.now();
@@ -2128,12 +2258,24 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         isPinchingRef.current = false;
       }
 
-      activePointerIdRef.current = pointerId;
-      if (markWindowRecovery) {
-        activeRecoveryWindowPointerIdRef.current = pointerId;
+      // If an earlier stroke's pointerup was missed, commit it cleanly before starting the new word/stroke
+      if (isDrawingRef.current && currentPointsRef.current.length > 0) {
+        commitActiveDrawingStrokeRef.current();
       }
+
       if (captureTarget) {
         trySetPointerCapture(captureTarget, pointerId);
+      }
+      activePointerIdRef.current = pointerId;
+      activeRecoveryWindowPointerIdRef.current = markWindowRecovery ? pointerId : null;
+
+      // Defer UI deselections only if something was actually selected/editing
+      if (selectedGridShapeId) setSelectedGridShapeId(null);
+      if (selectedGraphId) setSelectedGraphId(null);
+      if (selectedCalcId) setSelectedCalcId(null);
+      if (selectedImageId) setSelectedImageId(null);
+      if (editingDictateBoxId) {
+        onStopManualEditDictateBox?.();
       }
 
       const initialPts: StrokePoint[] =
@@ -2144,51 +2286,94 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             })
           : [{ ...getStageCoords(clientX, clientY), pressure }];
 
+      // If OS palm arbitration dropped capture mid-word within 140ms and we recovered the same pen pointer, bridge seamlessly
+      const bridge = lastCommittedBridgeRef.current;
+      if (
+        bridge &&
+        bridge.pointerId === pointerId &&
+        Date.now() - bridge.time < 140 &&
+        initialPts.length > 0 &&
+        Math.hypot(initialPts[0].x - bridge.point.x, initialPts[0].y - bridge.point.y) < 120
+      ) {
+        initialPts.unshift(bridge.point);
+      }
+      lastCommittedBridgeRef.current = null;
+
+      pendingLiveCanvasClearRef.current = false;
+      clearLiveCanvas();
       isDrawingRef.current = true;
       currentPointsRef.current = initialPts;
-      setIsDrawing(true);
-      setCurrentPoints(initialPts);
-      onColorUsed(currentColor);
+      renderedPointCountRef.current = 0;
+      drawIncrementalLivePoints(initialPts, currentColor, strokeWidth);
+
+      // Start lightweight throttled live overlay stream for Audience View (does NOT re-render CanvasStage)
+      if (!isAudienceViewer && onLiveOverlayChange && penType !== 'eraser') {
+        stopLiveStrokeStream();
+        liveStrokeStreamTimerRef.current = window.setInterval(() => {
+          if (!isDrawingRef.current || currentPointsRef.current.length < 1) return;
+          liveOverlayThrottleRef.current = Date.now();
+          lastLiveOverlaySentNonNullRef.current = true;
+          onLiveOverlayChange({
+            stroke: {
+              pageId,
+              tool: penType,
+              color: currentColor,
+              width: strokeWidth,
+              opacity: penType === 'highlighter' ? 0.35 : 1,
+              points: currentPointsRef.current.slice(),
+            },
+            shape: null,
+            graphMarquee: null,
+            angle: null,
+            dictatePreview: null,
+          });
+        }, 36);
+      }
     },
     [
-      isActivePage,
-      onActivatePage,
+      selectedGridShapeId,
+      selectedGraphId,
+      selectedCalcId,
+      selectedImageId,
       editingDictateBoxId,
       onStopManualEditDictateBox,
-      onClickOutsideDictateBox,
       getStageCoords,
-      onColorUsed,
+      clearLiveCanvas,
+      drawIncrementalLivePoints,
       currentColor,
+      strokeWidth,
+      isAudienceViewer,
+      onLiveOverlayChange,
+      penType,
+      pageId,
+      stopLiveStrokeStream,
     ]
   );
 
   const appendCoalescedDrawingPoints = useCallback(
     (clientX: number, clientY: number, pressure: number, coalesced: PointerEvent[] | null) => {
+      const pts = currentPointsRef.current;
       if (coalesced && coalesced.length > 0) {
-        const nextPts = [...currentPointsRef.current];
         for (let i = 0; i < coalesced.length; i++) {
           const ce = coalesced[i];
           const c = getStageCoords(ce.clientX, ce.clientY);
-          nextPts.push({ x: c.x, y: c.y, pressure: ce.pressure || pressure });
+          pts.push({ x: c.x, y: c.y, pressure: ce.pressure || pressure });
         }
-        currentPointsRef.current = nextPts;
-        setCurrentPoints(nextPts);
       } else {
         const pt = getStageCoords(clientX, clientY);
-        const nextPts = [...currentPointsRef.current, { x: pt.x, y: pt.y, pressure }];
-        currentPointsRef.current = nextPts;
-        setCurrentPoints(nextPts);
+        pts.push({ x: pt.x, y: pt.y, pressure });
       }
+      drawIncrementalLivePoints(pts, currentColor, strokeWidth);
     },
-    [getStageCoords]
+    [getStageCoords, drawIncrementalLivePoints, currentColor, strokeWidth]
   );
 
-  // Pointer Move
+  // Pointer Move (React fallback for non-inking modes; inking fast-path runs natively on interactionLayerRef)
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const nativeEv = e.nativeEvent as PointerEvent & {
       getCoalescedEvents?: () => PointerEvent[];
     };
-    if (lastProcessedPointerMoveRef.current === nativeEv) {
+    if (handledByNativeInkRef.current.has(nativeEv) || lastProcessedPointerMoveRef.current === nativeEv) {
       return;
     }
     lastProcessedPointerMoveRef.current = nativeEv;
@@ -2332,8 +2517,6 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           ? nativeEv.getCoalescedEvents()
           : null;
 
-      // Mid-stroke pen recovery: if pointerdown was dropped/delayed/canceled or failed size threshold initially,
-      // immediately begin drawing as soon as the contacting pen moves without waiting for lift & re-touch.
       if (!isDrawingRef.current) {
         const isSmartTipContacting =
           stylusConfig?.detectionMode === 'smart_tip' &&
@@ -2345,7 +2528,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           (e.buttons & 1) !== 0;
 
         if (isPenContacting || isSmartTipContacting || isMouseContacting) {
-          beginMidStrokeRecovery(
+          startImmediateStroke(
             e.pointerId,
             e.pointerType,
             e.clientX,
@@ -2649,8 +2832,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     return { selStrokeIds, selShapeIds, selGraphIds, selCalcIds, selImageIds, selDictateIds };
   };
 
-  // Pointer Up
+  // Pointer Up (React fallback for non-inking modes; inking fast-path runs natively on interactionLayerRef)
   const handlePointerUp = async (e: React.PointerEvent<HTMLDivElement>) => {
+    if (handledByNativeInkRef.current.has(e.nativeEvent)) {
+      return;
+    }
     const accepted = isPointerAccepted(e, 'up');
     if (e.pointerType === 'pen') {
       contactingPenIdsRef.current.delete(e.pointerId);
@@ -2784,31 +2970,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    // DRAWING COMMIT (reads synchronous ref points so rapid consecutive words never drop early or short strokes)
+    // DRAWING COMMIT fallback
     if (mode === 'drawing') {
       if (isDrawingRef.current) {
-        const pts = [...currentPointsRef.current];
+        const pts = currentPointsRef.current;
         const lastPt = pts[pts.length - 1];
         if (!lastPt || Math.hypot(x - lastPt.x, y - lastPt.y) > 0.25) {
           pts.push({ x, y, pressure: e.pressure || 0.5 });
+          drawIncrementalLivePoints(pts, currentColor, strokeWidth);
         }
-        isDrawingRef.current = false;
-        currentPointsRef.current = [];
-        setIsDrawing(false);
-        setCurrentPoints([]);
-        if (pts.length >= 1) {
-          onAddStroke({
-            id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            pageId,
-            tool: penType,
-            color: currentColor,
-            width: strokeWidth,
-            opacity: penType === 'highlighter' ? 0.35 : 1,
-            points: pts,
-          });
-        }
-        return;
+        commitActiveDrawingStrokeRef.current();
       }
+      return;
     }
 
     // GRAPHING COMMIT
@@ -3129,6 +3302,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   // Pointer Cancel (reset stylus / gesture states cleanly without letting rejected palm touches cancel active pen ink)
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (handledByNativeInkRef.current.has(e.nativeEvent)) {
+      return;
+    }
     if (e.pointerType === 'pen') {
       contactingPenIdsRef.current.delete(e.pointerId);
     }
@@ -3159,13 +3335,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       hasGhostedInCurrentGestureRef.current = false;
     }
     // Preserve any real pen points already drawn before an OS interruption
-    if (mode === 'drawing' && isDrawingRef.current && currentPointsRef.current.length >= 2) {
-      commitActiveDrawingStrokeRef.current();
+    if (mode === 'drawing' && isDrawingRef.current && currentPointsRef.current.length >= 1) {
+      commitActiveDrawingStrokeRef.current(e.pointerType === 'pen' ? e.pointerId : undefined);
     } else {
       isDrawingRef.current = false;
       currentPointsRef.current = [];
-      setIsDrawing(false);
-      setCurrentPoints([]);
+      stopLiveStrokeStream();
+      clearLiveCanvas();
     }
     setStylusZoomAnchor(null);
     setStylusPanStart(null);
@@ -3187,6 +3363,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   // Lost Pointer Capture: if browser drops pointer capture before pointerup, commit active ink stroke cleanly instead of losing it
   const handleLostPointerCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (handledByNativeInkRef.current.has(e.nativeEvent)) {
+      return;
+    }
     if (e.pointerType === 'pen') {
       contactingPenIdsRef.current.delete(e.pointerId);
     }
@@ -3204,133 +3383,452 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
     activePointerIdRef.current = null;
     if (mode === 'drawing' && isDrawingRef.current) {
-      commitActiveDrawingStrokeRef.current();
+      commitActiveDrawingStrokeRef.current(e.pointerType === 'pen' ? e.pointerId : undefined);
     }
   };
 
-  // Window-level mid-stroke lost-pen recovery & continuation:
-  // If an initial tap missed/failed outside .drawing-layer or lost capture before reaching .drawing-layer,
-  // catch contacting pen/stylus pointermove anywhere over the stage and start/continue drawing without requiring a lift.
-  const windowRecoveryRef = useRef<(ev: PointerEvent) => void>(() => {});
-  windowRecoveryRef.current = (ev: PointerEvent) => {
-    if (
-      isAudienceViewer ||
-      !isActivePage ||
-      !isVisibleInViewport ||
-      mode !== 'drawing' ||
-      isAnyEraseActive ||
-      isNavToolOverride ||
-      presenterMode === 'laser' ||
-      presenterMode === 'spotlight' ||
-      pendingPhotoSnippet
-    ) {
-      return;
-    }
+  // Native Direct-DOM Inking Engine + Window Missed-Down Fallback
+  // Attached directly to interactionLayerRef for synchronous setPointerCapture, immediate-mode 2D <canvas> rendering,
+  // pointerrawupdate/pointermove coalesced sampling, and zero React re-render overhead while writing.
+  const isInkingFastPathEnabled =
+    !isAudienceViewer &&
+    mode === 'drawing' &&
+    !isAnyEraseActive &&
+    !isNavToolOverride &&
+    presenterMode !== 'laser' &&
+    presenterMode !== 'spotlight' &&
+    !pendingPhotoSnippet;
 
-    const layer = interactionLayerRef.current;
-    if (!layer) return;
+  const nativeInkEngineRef = useRef<{
+    onDown: (ev: PointerEvent) => void;
+    onMove: (ev: PointerEvent) => void;
+    onRawUpdate: (ev: PointerEvent) => void;
+    onUp: (ev: PointerEvent) => void;
+    onCancel: (ev: PointerEvent) => void;
+    onLostCapture: (ev: PointerEvent) => void;
+    onWindowMove: (ev: PointerEvent) => void;
+  }>({
+    onDown: () => {},
+    onMove: () => {},
+    onRawUpdate: () => {},
+    onUp: () => {},
+    onCancel: () => {},
+    onLostCapture: () => {},
+    onWindowMove: () => {},
+  });
 
-    const nativeEv = ev as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
-    const isTrackedRecovery = activeRecoveryWindowPointerIdRef.current === ev.pointerId;
+  nativeInkEngineRef.current = {
+    onDown: (ev: PointerEvent) => {
+      if (!isInkingFastPathEnabled) return;
+      const layer = interactionLayerRef.current;
+      if (!layer) return;
 
-    // When already over .drawing-layer and not a window-recovered pointer, let React handlePointerMove process normally
-    if (!isTrackedRecovery && ev.target === layer) {
-      return;
-    }
+      if (ev.pointerType === 'pen') {
+        contactingPenIdsRef.current.add(ev.pointerId);
+        lastStylusEventAtRef.current = Date.now();
+        isStylusDownRef.current = true;
+        isPinchingRef.current = false;
+      }
 
-    const targetEl = ev.target as HTMLElement | null;
-    if (
-      !isTrackedRecovery &&
-      targetEl?.closest(
-        'header, aside, .floating-zoom, [data-floating-zoom], .banner-prompt, [role="dialog"], [data-testid="right-edge-scrollbar"], button, input, textarea'
-      )
-    ) {
-      return;
-    }
-
-    const rect = layer.getBoundingClientRect();
-    const insideStage =
-      ev.clientX >= rect.left &&
-      ev.clientX <= rect.right &&
-      ev.clientY >= rect.top &&
-      ev.clientY <= rect.bottom;
-
-    if (!insideStage && !isTrackedRecovery) {
-      return;
-    }
-
-    const penContacting = isPenEventContacting(nativeEv);
-    if (ev.pointerType === 'pen') {
-      lastStylusEventAtRef.current = Date.now();
-      if (!penContacting) {
-        contactingPenIdsRef.current.delete(ev.pointerId);
-        if (isTrackedRecovery && isDrawingRef.current) {
-          commitActiveDrawingStrokeRef.current();
-          activeRecoveryWindowPointerIdRef.current = null;
-          activePointerIdRef.current = null;
-        }
+      if (!isPointerAccepted(ev, 'down')) {
         return;
       }
-    }
 
-    if (!isPointerAccepted(ev, 'move')) {
-      return;
-    }
+      if (
+        ev.pointerType !== 'pen' &&
+        activePointerIdRef.current !== null &&
+        activePointerIdRef.current !== ev.pointerId &&
+        (isStylusDownRef.current || isDrawingRef.current)
+      ) {
+        return;
+      }
 
-    const smartTipContacting =
-      stylusConfig?.detectionMode === 'smart_tip' &&
-      ev.pointerType === 'touch' &&
-      (touchInputMode === 'two_finger' || activeSmartStylusPointerIdRef.current === ev.pointerId);
-    const mouseContacting =
-      ev.pointerType === 'mouse' &&
-      (stylusConfig?.allowMouseInput ?? true) &&
-      (ev.buttons & 1) !== 0;
+      if (isPinchingRef.current && ev.pointerType !== 'pen') return;
 
-    if (!penContacting && !smartTipContacting && !mouseContacting) {
-      return;
-    }
+      handledByNativeInkRef.current.add(ev);
+      const coalesced =
+        typeof (ev as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] }).getCoalescedEvents === 'function'
+          ? (ev as PointerEvent & { getCoalescedEvents: () => PointerEvent[] }).getCoalescedEvents()
+          : null;
 
-    if (isPinchingRef.current && ev.pointerType !== 'pen') {
-      return;
-    }
-
-    lastProcessedPointerMoveRef.current = nativeEv;
-    const coalesced =
-      typeof nativeEv.getCoalescedEvents === 'function'
-        ? nativeEv.getCoalescedEvents()
-        : null;
-    const pressure = ev.pressure || 0.5;
-
-    if (!isDrawingRef.current) {
-      beginMidStrokeRecovery(
+      startImmediateStroke(
         ev.pointerId,
         ev.pointerType,
         ev.clientX,
         ev.clientY,
-        pressure,
+        ev.pressure || 0.5,
         coalesced,
         layer,
-        true
+        false
       );
-      return;
-    }
+    },
 
-    if (
-      activeRecoveryWindowPointerIdRef.current === ev.pointerId ||
-      activePointerIdRef.current === ev.pointerId
-    ) {
-      appendCoalescedDrawingPoints(ev.clientX, ev.clientY, pressure, coalesced);
-    }
+    onMove: (ev: PointerEvent) => {
+      if (!isInkingFastPathEnabled) return;
+      const layer = interactionLayerRef.current;
+      if (!layer) return;
+      if (lastProcessedPointerMoveRef.current === ev) return;
+      if (!isPointerAccepted(ev, 'move')) return;
+
+      const penContacting = isPenEventContacting(ev);
+      if (ev.pointerType === 'pen') {
+        lastStylusEventAtRef.current = Date.now();
+        if (!penContacting) {
+          contactingPenIdsRef.current.delete(ev.pointerId);
+          if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+            isStylusDownRef.current = false;
+          }
+          if (activeRecoveryWindowPointerIdRef.current === ev.pointerId) {
+            activeRecoveryWindowPointerIdRef.current = null;
+          }
+          if (activePointerIdRef.current === ev.pointerId) {
+            if (isDrawingRef.current) {
+              commitActiveDrawingStrokeRef.current();
+            }
+            activePointerIdRef.current = null;
+          }
+          return;
+        }
+        contactingPenIdsRef.current.add(ev.pointerId);
+        isStylusDownRef.current = true;
+        isPinchingRef.current = false;
+        if (activePointerIdRef.current !== null && activePointerIdRef.current !== ev.pointerId) {
+          if (isDrawingRef.current && currentPointsRef.current.length > 0) {
+            commitActiveDrawingStrokeRef.current();
+          }
+          activePointerIdRef.current = ev.pointerId;
+        }
+      } else if (activePointerIdRef.current !== null && ev.pointerId !== activePointerIdRef.current) {
+        return;
+      }
+
+      if (isPinchingRef.current && ev.pointerType !== 'pen') return;
+
+      handledByNativeInkRef.current.add(ev);
+      lastProcessedPointerMoveRef.current = ev;
+
+      const coalesced =
+        typeof (ev as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] }).getCoalescedEvents === 'function'
+          ? (ev as PointerEvent & { getCoalescedEvents: () => PointerEvent[] }).getCoalescedEvents()
+          : null;
+      const pressure = ev.pressure || 0.5;
+
+      // Synthetic Stroke Initiation (Missed Down-State Fallback)
+      if (!isDrawingRef.current) {
+        const smartTipContacting =
+          stylusConfig?.detectionMode === 'smart_tip' &&
+          ev.pointerType === 'touch' &&
+          (touchInputMode === 'two_finger' || activeSmartStylusPointerIdRef.current === ev.pointerId);
+        const mouseContacting =
+          ev.pointerType === 'mouse' &&
+          (stylusConfig?.allowMouseInput ?? true) &&
+          (ev.buttons & 1) !== 0;
+
+        if (penContacting || smartTipContacting || mouseContacting) {
+          startImmediateStroke(
+            ev.pointerId,
+            ev.pointerType,
+            ev.clientX,
+            ev.clientY,
+            pressure,
+            coalesced,
+            layer,
+            false
+          );
+        }
+        return;
+      }
+
+      if (activePointerIdRef.current === null || activePointerIdRef.current === ev.pointerId) {
+        appendCoalescedDrawingPoints(ev.clientX, ev.clientY, pressure, coalesced);
+      }
+    },
+
+    // Hardware-rate raw update wakes up missed-down starts immediately before frame coalescing
+    onRawUpdate: (ev: PointerEvent) => {
+      if (!isInkingFastPathEnabled || isDrawingRef.current) return;
+      const layer = interactionLayerRef.current;
+      if (!layer) return;
+      if (ev.pointerType !== 'pen' && !(stylusConfig?.detectionMode === 'smart_tip' && ev.pointerType === 'touch')) {
+        return;
+      }
+      if (ev.pointerType === 'pen') {
+        if (!isPenEventContacting(ev)) return;
+        contactingPenIdsRef.current.add(ev.pointerId);
+        lastStylusEventAtRef.current = Date.now();
+        isStylusDownRef.current = true;
+        isPinchingRef.current = false;
+      }
+      if (!isPointerAccepted(ev, 'move')) return;
+
+      handledByNativeInkRef.current.add(ev);
+      lastProcessedPointerMoveRef.current = ev;
+      startImmediateStroke(
+        ev.pointerId,
+        ev.pointerType,
+        ev.clientX,
+        ev.clientY,
+        ev.pressure || 0.5,
+        null,
+        layer,
+        false
+      );
+    },
+
+    onUp: (ev: PointerEvent) => {
+      if (!isInkingFastPathEnabled) return;
+      const layer = interactionLayerRef.current;
+      const accepted = isPointerAccepted(ev, 'up');
+
+      if (ev.pointerType === 'pen') {
+        contactingPenIdsRef.current.delete(ev.pointerId);
+        lastStylusEventAtRef.current = Date.now();
+      }
+      if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
+        activeSmartStylusPointerIdRef.current = null;
+      }
+      if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+        isStylusDownRef.current = false;
+      }
+      if (activeRecoveryWindowPointerIdRef.current === ev.pointerId) {
+        activeRecoveryWindowPointerIdRef.current = null;
+      }
+
+      if (!accepted) return;
+      if (activePointerIdRef.current !== null && ev.pointerId !== activePointerIdRef.current) {
+        return;
+      }
+
+      handledByNativeInkRef.current.add(ev);
+      activePointerIdRef.current = null;
+      if (layer) {
+        tryReleasePointerCapture(layer, ev.pointerId);
+      }
+
+      if (isDrawingRef.current) {
+        const pt = getStageCoords(ev.clientX, ev.clientY);
+        const pts = currentPointsRef.current;
+        const lastPt = pts[pts.length - 1];
+        if (!lastPt || Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) > 0.25) {
+          pts.push({ x: pt.x, y: pt.y, pressure: ev.pressure || 0.5 });
+          drawIncrementalLivePoints(pts, currentColor, strokeWidth);
+        }
+        commitActiveDrawingStrokeRef.current();
+      }
+    },
+
+    onCancel: (ev: PointerEvent) => {
+      if (!isInkingFastPathEnabled && !isDrawingRef.current) return;
+      const layer = interactionLayerRef.current;
+      if (ev.pointerType === 'pen') {
+        contactingPenIdsRef.current.delete(ev.pointerId);
+      }
+      if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
+        activeSmartStylusPointerIdRef.current = null;
+      }
+      if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+        isStylusDownRef.current = false;
+      }
+      if (activeRecoveryWindowPointerIdRef.current === ev.pointerId) {
+        activeRecoveryWindowPointerIdRef.current = null;
+      }
+      if (ev.pointerId !== activePointerIdRef.current) {
+        return;
+      }
+      handledByNativeInkRef.current.add(ev);
+      activePointerIdRef.current = null;
+      if (layer) {
+        tryReleasePointerCapture(layer, ev.pointerId);
+      }
+      if (isDrawingRef.current && currentPointsRef.current.length >= 1) {
+        commitActiveDrawingStrokeRef.current(ev.pointerType === 'pen' ? ev.pointerId : undefined);
+      } else {
+        isDrawingRef.current = false;
+        currentPointsRef.current = [];
+        stopLiveStrokeStream();
+        clearLiveCanvas();
+      }
+    },
+
+    onLostCapture: (ev: PointerEvent) => {
+      if (!isInkingFastPathEnabled && !isDrawingRef.current) return;
+      if (ev.pointerType === 'pen') {
+        contactingPenIdsRef.current.delete(ev.pointerId);
+      }
+      if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
+        activeSmartStylusPointerIdRef.current = null;
+      }
+      if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+        isStylusDownRef.current = false;
+      }
+      if (activeRecoveryWindowPointerIdRef.current === ev.pointerId) {
+        activeRecoveryWindowPointerIdRef.current = null;
+      }
+      if (ev.pointerId !== activePointerIdRef.current) {
+        return;
+      }
+      handledByNativeInkRef.current.add(ev);
+      activePointerIdRef.current = null;
+      if (isDrawingRef.current) {
+        commitActiveDrawingStrokeRef.current(ev.pointerType === 'pen' ? ev.pointerId : undefined);
+      }
+    },
+
+    onWindowMove: (ev: PointerEvent) => {
+      if (!isInkingFastPathEnabled || !isVisibleInViewport) return;
+      if (handledByNativeInkRef.current.has(ev) || lastProcessedPointerMoveRef.current === ev) {
+        return;
+      }
+      const layer = interactionLayerRef.current;
+      if (!layer) return;
+
+      const isTrackedRecovery = activeRecoveryWindowPointerIdRef.current === ev.pointerId;
+      if (!isTrackedRecovery && ev.target === layer) {
+        return;
+      }
+
+      const targetEl = ev.target as HTMLElement | null;
+      if (
+        !isTrackedRecovery &&
+        targetEl?.closest(
+          'header, aside, .floating-zoom, [data-floating-zoom], .banner-prompt, [role="dialog"], [data-testid="right-edge-scrollbar"], button, input, textarea'
+        )
+      ) {
+        return;
+      }
+
+      const rect = layer.getBoundingClientRect();
+      const insideStage =
+        ev.clientX >= rect.left &&
+        ev.clientX <= rect.right &&
+        ev.clientY >= rect.top &&
+        ev.clientY <= rect.bottom;
+
+      if (!insideStage && !isTrackedRecovery) {
+        return;
+      }
+
+      const penContacting = isPenEventContacting(ev);
+      if (ev.pointerType === 'pen') {
+        lastStylusEventAtRef.current = Date.now();
+        if (!penContacting) {
+          contactingPenIdsRef.current.delete(ev.pointerId);
+          if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+            isStylusDownRef.current = false;
+          }
+          if (isTrackedRecovery && isDrawingRef.current) {
+            commitActiveDrawingStrokeRef.current();
+            activeRecoveryWindowPointerIdRef.current = null;
+            activePointerIdRef.current = null;
+          }
+          return;
+        }
+        contactingPenIdsRef.current.add(ev.pointerId);
+        isStylusDownRef.current = true;
+        isPinchingRef.current = false;
+      }
+
+      if (!isPointerAccepted(ev, 'move')) {
+        return;
+      }
+
+      const smartTipContacting =
+        stylusConfig?.detectionMode === 'smart_tip' &&
+        ev.pointerType === 'touch' &&
+        (touchInputMode === 'two_finger' || activeSmartStylusPointerIdRef.current === ev.pointerId);
+      const mouseContacting =
+        ev.pointerType === 'mouse' &&
+        (stylusConfig?.allowMouseInput ?? true) &&
+        (ev.buttons & 1) !== 0;
+
+      if (!penContacting && !smartTipContacting && !mouseContacting) {
+        return;
+      }
+
+      if (isPinchingRef.current && ev.pointerType !== 'pen') {
+        return;
+      }
+
+      handledByNativeInkRef.current.add(ev);
+      lastProcessedPointerMoveRef.current = ev;
+      const coalesced =
+        typeof (ev as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] }).getCoalescedEvents === 'function'
+          ? (ev as PointerEvent & { getCoalescedEvents: () => PointerEvent[] }).getCoalescedEvents()
+          : null;
+      const pressure = ev.pressure || 0.5;
+
+      if (!isDrawingRef.current) {
+        startImmediateStroke(
+          ev.pointerId,
+          ev.pointerType,
+          ev.clientX,
+          ev.clientY,
+          pressure,
+          coalesced,
+          layer,
+          true
+        );
+        return;
+      }
+
+      if (
+        activeRecoveryWindowPointerIdRef.current === ev.pointerId ||
+        activePointerIdRef.current === ev.pointerId
+      ) {
+        appendCoalescedDrawingPoints(ev.clientX, ev.clientY, pressure, coalesced);
+      }
+    },
   };
 
   useEffect(() => {
-    if (isAudienceViewer || !isActivePage || !isVisibleInViewport || mode !== 'drawing') return;
-    const onWinMove = (ev: PointerEvent) => windowRecoveryRef.current(ev);
+    const layer = interactionLayerRef.current;
+    if (!layer || isAudienceViewer) return;
+
+    const onDown = (ev: PointerEvent) => nativeInkEngineRef.current.onDown(ev);
+    const onMove = (ev: PointerEvent) => nativeInkEngineRef.current.onMove(ev);
+    const onRaw = (ev: PointerEvent) => nativeInkEngineRef.current.onRawUpdate(ev);
+    const onUp = (ev: PointerEvent) => nativeInkEngineRef.current.onUp(ev);
+    const onCancel = (ev: PointerEvent) => nativeInkEngineRef.current.onCancel(ev);
+    const onLostCapture = (ev: PointerEvent) => nativeInkEngineRef.current.onLostCapture(ev);
+
+    layer.addEventListener('pointerdown', onDown);
+    layer.addEventListener('pointermove', onMove);
+    layer.addEventListener('pointerup', onUp);
+    layer.addEventListener('pointercancel', onCancel);
+    layer.addEventListener('lostpointercapture', onLostCapture);
+    if ('onpointerrawupdate' in window) {
+      layer.addEventListener('pointerrawupdate' as keyof HTMLElementEventMap, onRaw as EventListener);
+    }
+
+    return () => {
+      layer.removeEventListener('pointerdown', onDown);
+      layer.removeEventListener('pointermove', onMove);
+      layer.removeEventListener('pointerup', onUp);
+      layer.removeEventListener('pointercancel', onCancel);
+      layer.removeEventListener('lostpointercapture', onLostCapture);
+      if ('onpointerrawupdate' in window) {
+        layer.removeEventListener('pointerrawupdate' as keyof HTMLElementEventMap, onRaw as EventListener);
+      }
+    };
+  }, [isAudienceViewer]);
+
+  useEffect(() => {
+    if (isAudienceViewer || !isVisibleInViewport || mode !== 'drawing') return;
+    const onWinMove = (ev: PointerEvent) => nativeInkEngineRef.current.onWindowMove(ev);
     window.addEventListener('pointermove', onWinMove, { capture: true, passive: true });
+    if ('onpointerrawupdate' in window) {
+      window.addEventListener('pointerrawupdate', onWinMove as EventListener, {
+        capture: true,
+        passive: true,
+      });
+    }
     return () => {
       window.removeEventListener('pointermove', onWinMove, { capture: true });
+      if ('onpointerrawupdate' in window) {
+        window.removeEventListener('pointerrawupdate', onWinMove as EventListener, { capture: true });
+      }
     };
-  }, [isAudienceViewer, isActivePage, isVisibleInViewport, mode]);
+  }, [isAudienceViewer, isVisibleInViewport, mode]);
 
   // Magic Grab Compass Handle: Click & Hold 400ms or drag to smoothly move items
   const [isCompassRepositioning, setIsCompassRepositioning] = useState(false);
@@ -3988,7 +4486,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
           {/* Page Freehand Strokes */}
           {pageStrokes.map((s) => {
-            if (!s.points || s.points.length < 2) return null;
+            if (!s.points || s.points.length < 1) return null;
             const pathD = pointsToSvgPath(s.points);
             const strokeColor = s.isGhosted ? '#DC2626' : s.color;
             const strokeDash = s.isGhosted ? '4 4' : undefined;
@@ -4016,26 +4514,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             );
           })}
 
-          {/* Active Live Freehand Stroke Preview */}
-          {isDrawing && currentPoints.length > 1 && (
-            <path
-              d={pointsToSvgPath(currentPoints)}
-              stroke={currentColor}
-              strokeWidth={strokeWidth}
-              opacity={penType === 'highlighter' ? 0.35 : penType === 'pencil' ? 0.85 : 1}
-              fill="none"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              style={penType === 'highlighter' ? { mixBlendMode: 'multiply' } : undefined}
-            />
-          )}
-
           {/* Audience Live Synced In-Progress Overlay Preview (Real-Time Stream) */}
           {isAudienceViewer && externalLiveOverlay && (
             <g>
               {externalLiveOverlay.stroke &&
                 externalLiveOverlay.stroke.pageId === pageId &&
-                externalLiveOverlay.stroke.points.length > 1 && (
+                externalLiveOverlay.stroke.points.length >= 1 && (
                   <path
                     d={pointsToSvgPath(externalLiveOverlay.stroke.points)}
                     stroke={externalLiveOverlay.stroke.color}
@@ -4778,6 +5262,19 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           )}
         </svg>
 
+        {/* 2.5 IMMEDIATE-MODE 2D CANVAS INKING BUFFER (Zero React re-renders during active strokes) */}
+        {!isAudienceViewer && (
+          <canvas
+            ref={liveCanvasRef}
+            style={{
+              touchAction: 'none',
+              opacity: penType === 'highlighter' ? 0.35 : penType === 'pencil' ? 0.85 : 1,
+              mixBlendMode: penType === 'highlighter' ? 'multiply' : 'normal',
+            }}
+            className="live-ink-canvas absolute inset-0 w-full h-full pointer-events-none z-[36]"
+          />
+        )}
+
         {/* 3. PLACED CANVAS IMAGE BOXES LAYER */}
         {pageImages.map((img) => (
           <CanvasImageBox
@@ -4917,6 +5414,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         {!isAudienceViewer && (
           <div
             ref={interactionLayerRef}
+            style={{ touchAction: 'none' }}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}

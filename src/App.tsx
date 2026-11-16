@@ -56,6 +56,14 @@ import { DocumentScrollBar } from './components/DocumentScrollBar';
 import { OnScreenKeyboard, VirtualKeyAction } from './components/OnScreenKeyboard';
 import { OverwriteConfirmModal } from './components/explorer/OverwriteConfirmModal';
 import { ClassicFileExplorerModal } from './components/explorer/ClassicFileExplorerModal';
+import {
+  CreatorInfoDialog,
+  hasCompletedTutorialCookie,
+  OnboardingTutorialModal,
+  setCompletedTutorialCookie,
+  TUTORIAL_STEPS,
+  TutorialStage,
+} from './components/OnboardingTutorialModal';
 import { harvestDocumentColors, CLASSROOM_PRESET_COLORS } from './utils/colorUtils';
 import { INITIAL_PAGES } from './utils/sampleData';
 import {
@@ -626,6 +634,101 @@ export default function App() {
   const isViewerTab =
     typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('view') === 'viewer';
+
+  // Interactive first-launch tutorial & persistent top-right Creator Info hub
+  const [tutorialStage, setTutorialStage] = useState<TutorialStage>(() =>
+    !isViewerTab && !hasCompletedTutorialCookie() ? 'welcome' : 'idle'
+  );
+  const [tutorialStepIndex, setTutorialStepIndex] = useState<number>(0);
+  const [isCreatorInfoOpen, setIsCreatorInfoOpen] = useState<boolean>(false);
+  const [creatorInfoJustLanded, setCreatorInfoJustLanded] = useState<boolean>(false);
+  const [isModeBarCollapsed, setIsModeBarCollapsed] = useState<boolean>(false);
+  const preTutorialRestoreRef = useRef<{
+    mode: AppMode;
+    shapeType: ShapeType;
+    isGeometricEraserActive: boolean;
+    isDictateEraserActive: boolean;
+    isModeBarCollapsed: boolean;
+  } | null>(null);
+
+  const applyTutorialStepMode = useCallback((idx: number) => {
+    const step = TUTORIAL_STEPS[idx];
+    if (!step) return;
+    if (step.id === 'mode-bar-collapse') {
+      setIsModeBarCollapsed(false);
+    }
+    if (step.switchMode) {
+      setIsGeometricEraserActive(false);
+      setIsDictateEraserActive(false);
+      setMode(step.switchMode);
+    }
+    if (step.shapeType) {
+      setShapeType(step.shapeType);
+    }
+  }, []);
+
+  const restorePreTutorialState = useCallback(() => {
+    const saved = preTutorialRestoreRef.current;
+    if (saved) {
+      setMode(saved.mode);
+      setShapeType(saved.shapeType);
+      setIsGeometricEraserActive(saved.isGeometricEraserActive);
+      setIsDictateEraserActive(saved.isDictateEraserActive);
+      setIsModeBarCollapsed(saved.isModeBarCollapsed);
+      preTutorialRestoreRef.current = null;
+    }
+  }, []);
+
+  const handleStartTutorial = useCallback(() => {
+    preTutorialRestoreRef.current = {
+      mode,
+      shapeType,
+      isGeometricEraserActive,
+      isDictateEraserActive,
+      isModeBarCollapsed,
+    };
+    setIsModeBarCollapsed(false);
+    setTutorialStepIndex(0);
+    setTutorialStage('tour');
+    applyTutorialStepMode(0);
+  }, [
+    mode,
+    shapeType,
+    isGeometricEraserActive,
+    isDictateEraserActive,
+    isModeBarCollapsed,
+    applyTutorialStepMode,
+  ]);
+
+  const handleLaterTutorial = useCallback(() => {
+    setTutorialStage('idle');
+  }, []);
+
+  const handleChangeTutorialStep = useCallback(
+    (nextIdx: number) => {
+      const clamped = Math.max(0, Math.min(TUTORIAL_STEPS.length - 1, nextIdx));
+      setTutorialStepIndex(clamped);
+      applyTutorialStepMode(clamped);
+    },
+    [applyTutorialStepMode]
+  );
+
+  const handleSkipTutorial = useCallback(() => {
+    setTutorialStage('idle');
+    restorePreTutorialState();
+  }, [restorePreTutorialState]);
+
+  const handleCompleteTutorialWithAnimation = useCallback(() => {
+    setCompletedTutorialCookie();
+    restorePreTutorialState();
+    setTutorialStage('animating');
+  }, [restorePreTutorialState]);
+
+  const handleTutorialAnimationEnd = useCallback(() => {
+    setTutorialStage('idle');
+    setCreatorInfoJustLanded(true);
+    window.setTimeout(() => setCreatorInfoJustLanded(false), 950);
+  }, []);
 
   useEffect(() => {
     const mainEl = mainScrollRef.current;
@@ -3691,6 +3794,11 @@ export default function App() {
         onSetGeometricEraserActive={setIsGeometricEraserActive}
         isDictateEraserActive={isDictateEraserActive}
         onSetDictateEraserActive={handleSetDictateEraserActive}
+        onOpenCreatorInfo={() => setIsCreatorInfoOpen(true)}
+        isCreatorInfoOpen={isCreatorInfoOpen}
+        creatorInfoJustLanded={creatorInfoJustLanded}
+        isModeBarCollapsed={isModeBarCollapsed}
+        onToggleModeBarCollapsed={() => setIsModeBarCollapsed((prev) => !prev)}
       />
 
       {/* 2. MAIN VIRTUALIZED WORKSPACE CANVAS (Only viewport-visible pages load; off-screen pages stay blurry placeholders) */}
@@ -3745,6 +3853,7 @@ export default function App() {
       <div className="flex-1 relative flex overflow-hidden overscroll-none">
         <main
           ref={mainScrollRef}
+          data-tour-id="canvas-stage"
           onScroll={() => {
             updateScrollPageIndicator();
             syncCameraNow();
@@ -3966,6 +4075,7 @@ export default function App() {
         <button
           type="button"
           onClick={handleToggleFullPov}
+          data-tour-id={isFullPovMode ? 'pov-controls' : undefined}
           title={isFullPovMode ? 'Exit Full POV View' : 'Expand to Full POV View'}
           style={
             isFullPovMode
@@ -3981,6 +4091,7 @@ export default function App() {
         {!isFullPovMode && (
           <div
             ref={bottomAddPageRef}
+            data-tour-id="pov-controls"
             style={
               rightSpacePx >= 260
                 ? { left: `${pageRightPx + 14}px`, bottom: '16px' }
@@ -4233,6 +4344,27 @@ export default function App() {
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
+      )}
+
+      {/* 7. FIRST-LAUNCH INTERACTIVE TUTORIAL & TOP-RIGHT CREATOR INFO DIALOG */}
+      {!isViewerTab && (
+        <>
+          <OnboardingTutorialModal
+            stage={tutorialStage}
+            stepIndex={tutorialStepIndex}
+            onStartTour={handleStartTutorial}
+            onLater={handleLaterTutorial}
+            onStepChange={handleChangeTutorialStep}
+            onSkipTour={handleSkipTutorial}
+            onCompleteWithAnimation={handleCompleteTutorialWithAnimation}
+            onAnimationEnd={handleTutorialAnimationEnd}
+          />
+          <CreatorInfoDialog
+            isOpen={isCreatorInfoOpen}
+            onClose={() => setIsCreatorInfoOpen(false)}
+            onReplayTutorial={handleStartTutorial}
+          />
+        </>
       )}
     </div>
   );
