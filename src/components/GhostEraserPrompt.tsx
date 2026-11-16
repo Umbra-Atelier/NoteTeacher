@@ -126,15 +126,24 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
 
   useEffect(() => {
     const el = popupRef.current;
+    let rafId: number | null = null;
+    const scheduleSync = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        recomputePosition();
+      });
+    };
     let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined' && el) {
-      ro = new ResizeObserver(() => recomputePosition());
+      ro = new ResizeObserver(scheduleSync);
       ro.observe(el);
     }
-    window.addEventListener('resize', recomputePosition);
+    window.addEventListener('resize', scheduleSync);
     return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
       ro?.disconnect();
-      window.removeEventListener('resize', recomputePosition);
+      window.removeEventListener('resize', scheduleSync);
     };
   }, [recomputePosition]);
 

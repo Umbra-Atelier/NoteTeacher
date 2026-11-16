@@ -99,6 +99,7 @@ export interface GeometricShape {
   startAngle?: number;
   endAngle?: number;
   arcSweep?: 'acute' | 'obtuse';
+  arcSweepFlag?: 0 | 1;
   angleDegrees?: number;
   radius?: number;
   centerX?: number;

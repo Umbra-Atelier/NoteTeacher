@@ -766,6 +766,72 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const [angleRay1, setAngleRay1] = useState<number>(0);
   const [angleRay2, setAngleRay2] = useState<number>(Math.PI / 3);
 
+  const computeUnwrappedRay2 = useCallback(
+    (rawAngle: number, prevRay2: number, ray1: number) => {
+      if (!allowNegativeAngles) {
+        return rawAngle;
+      }
+      let delta = rawAngle - prevRay2;
+      while (delta > Math.PI) delta -= 2 * Math.PI;
+      while (delta < -Math.PI) delta += 2 * Math.PI;
+      let nextRay2 = prevRay2 + delta;
+      let sweep = nextRay2 - ray1;
+      while (sweep >= 2 * Math.PI) {
+        sweep -= 2 * Math.PI;
+        nextRay2 -= 2 * Math.PI;
+      }
+      while (sweep <= -2 * Math.PI) {
+        sweep += 2 * Math.PI;
+        nextRay2 += 2 * Math.PI;
+      }
+      return nextRay2;
+    },
+    [allowNegativeAngles]
+  );
+
+  const computeNegativeModeSectors = useCallback(
+    (ray1: number, ray2: number) => {
+      let rawDiffSvg = ray2 - ray1;
+      while (rawDiffSvg >= 2 * Math.PI) rawDiffSvg -= 2 * Math.PI;
+      while (rawDiffSvg <= -2 * Math.PI) rawDiffSvg += 2 * Math.PI;
+
+      const posDirSign = angleNegativeDirection === 'clockwise' ? -1 : 1;
+      const signedSweep = rawDiffSvg * posDirSign;
+
+      const primarySpan = Math.abs(signedSweep);
+      const primarySweepFlag: 0 | 1 = rawDiffSvg >= 0 ? 1 : 0;
+      const primaryLargeArcFlag: 0 | 1 = primarySpan > Math.PI ? 1 : 0;
+      const primaryDegMag = Math.round((primarySpan * 180) / Math.PI) % 360;
+      const primaryIsNeg = signedSweep < 0 && primaryDegMag > 0;
+      const primaryIsNegRad = signedSweep < 0 && primarySpan / Math.PI >= 0.005 && primarySpan / Math.PI < 1.995;
+
+      const secondarySpan = Math.max(0, 2 * Math.PI - primarySpan);
+      const secondarySweepFlag: 0 | 1 = primarySweepFlag === 1 ? 0 : 1;
+      const secondaryLargeArcFlag: 0 | 1 = secondarySpan > Math.PI ? 1 : 0;
+      const secondaryDegMag = Math.round((secondarySpan * 180) / Math.PI) % 360;
+      const secondaryIsNeg = signedSweep >= 0 && secondaryDegMag > 0;
+      const secondaryIsNegRad = signedSweep >= 0 && secondarySpan / Math.PI >= 0.005 && secondarySpan / Math.PI < 1.995;
+
+      return {
+        rawDiffSvg,
+        signedSweep,
+        primarySpan,
+        primarySweepFlag,
+        primaryLargeArcFlag,
+        primaryDegMag,
+        primaryIsNeg,
+        primaryIsNegRad,
+        secondarySpan,
+        secondarySweepFlag,
+        secondaryLargeArcFlag,
+        secondaryDegMag,
+        secondaryIsNeg,
+        secondaryIsNegRad,
+      };
+    },
+    [angleNegativeDirection]
+  );
+
   // Active Desmos Marquee Stretch
   const [graphDragStart, setGraphDragStart] = useState<{ x: number; y: number } | null>(null);
   const [graphDragCurrent, setGraphDragCurrent] = useState<{ x: number; y: number } | null>(null);
@@ -1982,7 +2048,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           return;
         }
         if (angleStep === 'ray2_drag' && angleCenter) {
-          setAngleRay2(Math.atan2(y - angleCenter.y, x - angleCenter.x));
+          const rawAngle = Math.atan2(y - angleCenter.y, x - angleCenter.x);
+          setAngleRay2((prev) => computeUnwrappedRay2(rawAngle, prev, angleRay1));
           return;
         }
         return;
@@ -2311,12 +2378,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           setAngleRay1(Math.atan2(y - angleCenter.y, x - angleCenter.x));
           return;
         }
-        if (angleStep === 'ray1_drag' && angleCenter && e.buttons === 1) {
+        if (angleStep === 'ray1_drag' && angleCenter && (e.buttons & 1) !== 0) {
           setAngleRay1(Math.atan2(y - angleCenter.y, x - angleCenter.x));
           return;
         }
-        if (angleStep === 'ray2_drag' && angleCenter && e.buttons === 1) {
-          setAngleRay2(Math.atan2(y - angleCenter.y, x - angleCenter.x));
+        if (angleStep === 'ray2_drag' && angleCenter && (e.buttons & 1) !== 0) {
+          const rawAngle = Math.atan2(y - angleCenter.y, x - angleCenter.x);
+          setAngleRay2((prev) => computeUnwrappedRay2(rawAngle, prev, angleRay1));
           return;
         }
         return;
@@ -3365,24 +3433,33 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // 2. Terminal arm 2 (line, no arrow)
   // 3. Angle arc (with degree/radian calculation)
   // User can select or erase any arm or the arc independently!
-  const handleCompleteAngle = (chosenSweep: 'acute' | 'obtuse') => {
+  const handleCompleteAngle = (chosenSweep: 'acute' | 'obtuse' | 'primary' | 'secondary') => {
     if (!angleCenter) return;
-    let diff = (angleRay2 - angleRay1) % (2 * Math.PI);
-    if (diff < 0) diff += 2 * Math.PI;
-    const acuteSpan = diff <= Math.PI ? diff : 2 * Math.PI - diff;
-    const obtuseSpan = 2 * Math.PI - acuteSpan;
-    const chosenSpan = chosenSweep === 'acute' ? acuteSpan : obtuseSpan;
 
-    // Detect negative angle when Ray 2 is pulled past Ray 1 in the configured negative direction
-    let rawDiff = angleRay2 - angleRay1;
-    while (rawDiff > Math.PI) rawDiff -= 2 * Math.PI;
-    while (rawDiff < -Math.PI) rawDiff += 2 * Math.PI;
-    const isNegative =
-      allowNegativeAngles &&
-      (angleNegativeDirection === 'clockwise' ? rawDiff > 0 : rawDiff < 0);
+    let chosenSpan = 0;
+    let calculatedDeg = 0;
+    let storedArcSweep: 'acute' | 'obtuse' = 'acute';
+    let storedSweepFlag: 0 | 1 | undefined;
 
-    let calculatedDeg = Math.round((chosenSpan * 180) / Math.PI);
-    if (isNegative && chosenSweep === 'acute') calculatedDeg = -calculatedDeg;
+    if (allowNegativeAngles) {
+      const sectors = computeNegativeModeSectors(angleRay1, angleRay2);
+      const isPrimary = chosenSweep === 'primary' || chosenSweep === 'acute';
+      chosenSpan = isPrimary ? sectors.primarySpan : sectors.secondarySpan;
+      storedSweepFlag = isPrimary ? sectors.primarySweepFlag : sectors.secondarySweepFlag;
+      const degMag = isPrimary ? sectors.primaryDegMag : sectors.secondaryDegMag;
+      const isNeg = isPrimary ? sectors.primaryIsNeg : sectors.secondaryIsNeg;
+      calculatedDeg = isNeg && degMag > 0 ? -degMag : degMag;
+      storedArcSweep = chosenSpan > Math.PI ? 'obtuse' : 'acute';
+    } else {
+      let diff = (angleRay2 - angleRay1) % (2 * Math.PI);
+      if (diff < 0) diff += 2 * Math.PI;
+      const acuteSpan = diff <= Math.PI ? diff : 2 * Math.PI - diff;
+      const obtuseSpan = 2 * Math.PI - acuteSpan;
+      const isObtuseChoice = chosenSweep === 'obtuse' || chosenSweep === 'secondary';
+      chosenSpan = isObtuseChoice ? obtuseSpan : acuteSpan;
+      calculatedDeg = Math.round((chosenSpan * 180) / Math.PI);
+      storedArcSweep = isObtuseChoice ? 'obtuse' : 'acute';
+    }
 
     // 1. Ray 1 (terminal arm 1 - line, no arrow)
     const ray1: GeometricShape = {
@@ -3426,7 +3503,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       radius: angleRadius,
       startAngle: angleRay1,
       endAngle: angleRay2,
-      arcSweep: chosenSweep,
+      arcSweep: storedArcSweep,
+      arcSweepFlag: storedSweepFlag,
       angleDegrees: calculatedDeg,
       strokeColor: currentColor,
       strokeWidth: shapeStrokeWidth,
@@ -3479,6 +3557,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (!isAcute) {
         sweepFlag = sweepFlag === 1 ? 0 : 1;
       }
+      if (sh.arcSweepFlag !== undefined) {
+        sweepFlag = sh.arcSweepFlag;
+      }
       const largeArcFlag = isAcute ? 0 : 1;
 
       const startX = cx + r * Math.cos(a1);
@@ -3493,6 +3574,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       const badgeR = Math.max(16, r * 0.7);
       const badgeX = cx + badgeR * Math.cos(midAngle);
       const badgeY = cy + badgeR * Math.sin(midAngle);
+      const degLabel = `${deg}°`;
+      const badgeWidth = Math.max(32, degLabel.length * 7 + 12);
 
       return (
         <g key={sh.id} opacity={opacity}>
@@ -3507,9 +3590,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           />
           <g transform={`translate(${badgeX}, ${badgeY})`}>
             <rect
-              x={-16}
+              x={-badgeWidth / 2}
               y={-10}
-              width={32}
+              width={badgeWidth}
               height={20}
               rx={6}
               fill="rgba(15, 23, 42, 0.85)"
@@ -3525,7 +3608,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               fontWeight="bold"
               fontFamily="sans-serif"
             >
-              {deg}°
+              {degLabel}
             </text>
           </g>
         </g>
@@ -3743,7 +3826,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               {angleStep === 'circle_drag' && 'Release pointer to lock circle size'}
               {angleStep === 'ray1_drag' && 'Drag blue terminal ray to orient 1st direction, then release'}
               {angleStep === 'ray2_drag' && 'Drag red terminal ray to orient 2nd direction, then release'}
-              {angleStep === 'sector_select' && 'Click either the Acute or Obtuse arc button to keep that angle'}
+              {angleStep === 'sector_select' &&
+                (allowNegativeAngles
+                  ? 'Click either angle arc button to keep that angle'
+                  : 'Click either the Acute or Obtuse arc button to keep that angle')}
             </span>
             <button
               type="button"
@@ -4655,7 +4741,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               {/* Ray 1 Handle */}
               <circle
                 cx={angleCenter.x + angleRadius * Math.cos(angleRay1)}
-                cy={angleCenter.y + angleRay1 ? angleCenter.y + angleRadius * Math.sin(angleRay1) : angleCenter.y}
+                cy={angleCenter.y + angleRadius * Math.sin(angleRay1)}
                 r={8}
                 fill="#2563EB"
                 stroke="#FFFFFF"
@@ -5026,99 +5112,133 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         )}
         {/* 7.5 ACTIVE ANGLE TOOL SECTOR SELECT & LIVE DISPLAY OVERLAY (At z-50 above interaction layer) */}
         {mode === 'geometric' && shapeType === 'angle' && (angleStep === 'ray2_drag' || angleStep === 'sector_select') && angleCenter && (() => {
-          let diff = (angleRay2 - angleRay1) % (2 * Math.PI);
-          if (diff < 0) diff += 2 * Math.PI;
-          const acuteSpan = diff <= Math.PI ? diff : 2 * Math.PI - diff;
-          const obtuseSpan = 2 * Math.PI - acuteSpan;
-
-          let rawDiff = angleRay2 - angleRay1;
-          while (rawDiff > Math.PI) rawDiff -= 2 * Math.PI;
-          while (rawDiff < -Math.PI) rawDiff += 2 * Math.PI;
-          const isNegative =
-            allowNegativeAngles &&
-            (angleNegativeDirection === 'clockwise' ? rawDiff > 0 : rawDiff < 0);
-
-          const formatAngleVal = (spanRad: number, isNeg: boolean) => {
-            const sign = isNeg ? '-' : '';
+          const formatAngleVal = (spanRad: number, isNegDeg: boolean, isNegRad: boolean) => {
             if (angleUnit === 'rad') {
-              return `${sign}${(spanRad / Math.PI).toFixed(2)}π rad`;
+              const piMult = spanRad / Math.PI;
+              const wrappedPi = piMult >= 1.995 ? 0 : piMult;
+              const sign = isNegRad ? '-' : '';
+              return `${sign}${wrappedPi.toFixed(2)}π rad`;
             }
-            return `${sign}${Math.round((spanRad * 180) / Math.PI)}°`;
+            const degVal = Math.round((spanRad * 180) / Math.PI) % 360;
+            const sign = isNegDeg && degVal > 0 ? '-' : '';
+            return `${sign}${degVal}°`;
           };
 
-          const acuteText = `${formatAngleVal(acuteSpan, isNegative)} Acute`;
-          const obtuseText = `${formatAngleVal(obtuseSpan, false)} Obtuse`;
+          const startX = angleCenter.x + angleRadius * Math.cos(angleRay1);
+          const startY = angleCenter.y + angleRadius * Math.sin(angleRay1);
+          const endX = angleCenter.x + angleRadius * Math.cos(angleRay2);
+          const endY = angleCenter.y + angleRadius * Math.sin(angleRay2);
 
-          // Geometry for Acute
-          const acuteSweep = diff <= Math.PI ? 1 : 0;
-          const acuteStartX = angleCenter.x + angleRadius * Math.cos(angleRay1);
-          const acuteStartY = angleCenter.y + angleRadius * Math.sin(angleRay1);
-          const acuteEndX = angleCenter.x + angleRadius * Math.cos(angleRay2);
-          const acuteEndY = angleCenter.y + angleRadius * Math.sin(angleRay2);
-          const acuteD = `M ${acuteStartX} ${acuteStartY} A ${angleRadius} ${angleRadius} 0 0 ${acuteSweep} ${acuteEndX} ${acuteEndY}`;
-          const acuteWedge = `M ${angleCenter.x} ${angleCenter.y} L ${acuteStartX} ${acuteStartY} A ${angleRadius} ${angleRadius} 0 0 ${acuteSweep} ${acuteEndX} ${acuteEndY} Z`;
+          let primaryChoice: 'acute' | 'primary' = 'acute';
+          let secondaryChoice: 'obtuse' | 'secondary' = 'obtuse';
+          let primaryText = '';
+          let secondaryText = '';
+          let primarySweep = 1;
+          let primaryLargeArc = 0;
+          let primarySpan = 0;
+          let secondarySweep = 0;
+          let secondaryLargeArc = 1;
+          let secondarySpan = 0;
 
-          const acuteMidAngle = acuteSweep === 1 ? angleRay1 + acuteSpan / 2 : angleRay1 - acuteSpan / 2;
-          const acuteBadgeDist = angleRadius + 44;
-          const acuteBadgeX = angleCenter.x + acuteBadgeDist * Math.cos(acuteMidAngle);
-          const acuteBadgeY = angleCenter.y + acuteBadgeDist * Math.sin(acuteMidAngle);
-          const acuteArcEdgeX = angleCenter.x + angleRadius * Math.cos(acuteMidAngle);
-          const acuteArcEdgeY = angleCenter.y + angleRadius * Math.sin(acuteMidAngle);
+          if (allowNegativeAngles) {
+            const sectors = computeNegativeModeSectors(angleRay1, angleRay2);
+            primaryChoice = 'primary';
+            secondaryChoice = 'secondary';
+            primarySpan = sectors.primarySpan;
+            primarySweep = sectors.primarySweepFlag;
+            primaryLargeArc = sectors.primaryLargeArcFlag;
+            secondarySpan = sectors.secondarySpan;
+            secondarySweep = sectors.secondarySweepFlag;
+            secondaryLargeArc = sectors.secondaryLargeArcFlag;
 
-          // Geometry for Obtuse
-          const obtuseSweep = acuteSweep === 1 ? 0 : 1;
-          const obtuseD = `M ${acuteStartX} ${acuteStartY} A ${angleRadius} ${angleRadius} 0 1 ${obtuseSweep} ${acuteEndX} ${acuteEndY}`;
-          const obtuseWedge = `M ${angleCenter.x} ${angleCenter.y} L ${acuteStartX} ${acuteStartY} A ${angleRadius} ${angleRadius} 0 1 ${obtuseSweep} ${acuteEndX} ${acuteEndY} Z`;
+            const pVal = formatAngleVal(sectors.primarySpan, sectors.primaryIsNeg, sectors.primaryIsNegRad);
+            const sVal = formatAngleVal(sectors.secondarySpan, sectors.secondaryIsNeg, sectors.secondaryIsNegRad);
+            const pSuffix = sectors.primaryDegMag > 0 || (angleUnit === 'rad' && sectors.primarySpan / Math.PI >= 0.005)
+              ? (sectors.signedSweep < 0 ? ' Neg' : ' Pos')
+              : '';
+            const sSuffix = sectors.secondaryDegMag > 0 || (angleUnit === 'rad' && sectors.secondarySpan / Math.PI >= 0.005)
+              ? (sectors.signedSweep >= 0 ? ' Neg' : ' Pos')
+              : '';
+            primaryText = `${pVal}${pSuffix}`;
+            secondaryText = `${sVal}${sSuffix}`;
+          } else {
+            let diff = (angleRay2 - angleRay1) % (2 * Math.PI);
+            if (diff < 0) diff += 2 * Math.PI;
+            const acuteSpan = diff <= Math.PI ? diff : 2 * Math.PI - diff;
+            const obtuseSpan = 2 * Math.PI - acuteSpan;
 
-          const obtuseMidAngle = obtuseSweep === 1 ? angleRay1 + obtuseSpan / 2 : angleRay1 - obtuseSpan / 2;
-          const obtuseBadgeDist = angleRadius + 44;
-          const obtuseBadgeX = angleCenter.x + obtuseBadgeDist * Math.cos(obtuseMidAngle);
-          const obtuseBadgeY = angleCenter.y + obtuseBadgeDist * Math.sin(obtuseMidAngle);
-          const obtuseArcEdgeX = angleCenter.x + angleRadius * Math.cos(obtuseMidAngle);
-          const obtuseArcEdgeY = angleCenter.y + angleRadius * Math.sin(obtuseMidAngle);
+            primarySpan = acuteSpan;
+            secondarySpan = obtuseSpan;
+            primarySweep = diff <= Math.PI ? 1 : 0;
+            primaryLargeArc = 0;
+            secondarySweep = primarySweep === 1 ? 0 : 1;
+            secondaryLargeArc = 1;
+
+            primaryText = `${formatAngleVal(acuteSpan, false, false)} Acute`;
+            secondaryText = `${formatAngleVal(obtuseSpan, false, false)} Obtuse`;
+          }
+
+          const primaryD = `M ${startX} ${startY} A ${angleRadius} ${angleRadius} 0 ${primaryLargeArc} ${primarySweep} ${endX} ${endY}`;
+          const primaryWedge = `M ${angleCenter.x} ${angleCenter.y} L ${startX} ${startY} A ${angleRadius} ${angleRadius} 0 ${primaryLargeArc} ${primarySweep} ${endX} ${endY} Z`;
+
+          const primaryMidAngle = primarySweep === 1 ? angleRay1 + primarySpan / 2 : angleRay1 - primarySpan / 2;
+          const badgeDist = angleRadius + 44;
+          const primaryBadgeX = angleCenter.x + badgeDist * Math.cos(primaryMidAngle);
+          const primaryBadgeY = angleCenter.y + badgeDist * Math.sin(primaryMidAngle);
+          const primaryArcEdgeX = angleCenter.x + angleRadius * Math.cos(primaryMidAngle);
+          const primaryArcEdgeY = angleCenter.y + angleRadius * Math.sin(primaryMidAngle);
+
+          const secondaryD = `M ${startX} ${startY} A ${angleRadius} ${angleRadius} 0 ${secondaryLargeArc} ${secondarySweep} ${endX} ${endY}`;
+          const secondaryWedge = `M ${angleCenter.x} ${angleCenter.y} L ${startX} ${startY} A ${angleRadius} ${angleRadius} 0 ${secondaryLargeArc} ${secondarySweep} ${endX} ${endY} Z`;
+
+          const secondaryMidAngle = secondarySweep === 1 ? angleRay1 + secondarySpan / 2 : angleRay1 - secondarySpan / 2;
+          const secondaryBadgeX = angleCenter.x + badgeDist * Math.cos(secondaryMidAngle);
+          const secondaryBadgeY = angleCenter.y + badgeDist * Math.sin(secondaryMidAngle);
+          const secondaryArcEdgeX = angleCenter.x + angleRadius * Math.cos(secondaryMidAngle);
+          const secondaryArcEdgeY = angleCenter.y + angleRadius * Math.sin(secondaryMidAngle);
 
           const isClickable = angleStep === 'sector_select';
 
           return (
             <svg className="absolute inset-0 w-full h-full pointer-events-none z-50">
-              {/* Acute Arc & Callout Line */}
+              {/* Primary Arc & Callout Line */}
               {isClickable && (
                 <path
-                  d={acuteWedge}
+                  d={primaryWedge}
                   fill="rgba(16, 185, 129, 0.15)"
                   className="cursor-pointer pointer-events-auto hover:fill-emerald-300/30 transition-colors"
-                  onClick={() => handleCompleteAngle('acute')}
+                  onClick={() => handleCompleteAngle(primaryChoice)}
                 />
               )}
               <path
-                d={acuteD}
+                d={primaryD}
                 stroke="#10B981"
                 strokeWidth={isClickable ? 4.5 : 3}
                 fill="none"
                 strokeLinecap="round"
                 className={isClickable ? 'cursor-pointer pointer-events-auto' : ''}
-                onClick={isClickable ? () => handleCompleteAngle('acute') : undefined}
+                onClick={isClickable ? () => handleCompleteAngle(primaryChoice) : undefined}
               />
               {/* Dashed connector from arc to badge */}
               <line
-                x1={acuteArcEdgeX}
-                y1={acuteArcEdgeY}
-                x2={acuteBadgeX}
-                y2={acuteBadgeY}
+                x1={primaryArcEdgeX}
+                y1={primaryArcEdgeY}
+                x2={primaryBadgeX}
+                y2={primaryBadgeY}
                 stroke="#10B981"
                 strokeWidth={1.5}
                 strokeDasharray="3 3"
               />
-              {/* Acute Badge */}
+              {/* Primary Badge */}
               <g
-                transform={`translate(${acuteBadgeX}, ${acuteBadgeY})`}
-                onClick={isClickable ? () => handleCompleteAngle('acute') : undefined}
+                transform={`translate(${primaryBadgeX}, ${primaryBadgeY})`}
+                onClick={isClickable ? () => handleCompleteAngle(primaryChoice) : undefined}
                 className={isClickable ? 'cursor-pointer pointer-events-auto transition-transform hover:scale-105' : ''}
               >
                 <rect
-                  x={-55}
+                  x={-60}
                   y={-14}
-                  width={110}
+                  width={120}
                   height={28}
                   rx={14}
                   fill="#065F46"
@@ -5135,48 +5255,48 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   fontWeight="bold"
                   fontFamily="sans-serif"
                 >
-                  {acuteText} {isClickable ? '▾' : ''}
+                  {primaryText} {isClickable ? '▾' : ''}
                 </text>
               </g>
 
-              {/* Obtuse Arc & Callout Line */}
+              {/* Secondary Arc & Callout Line */}
               {isClickable && (
                 <path
-                  d={obtuseWedge}
+                  d={secondaryWedge}
                   fill="rgba(245, 158, 11, 0.12)"
                   className="cursor-pointer pointer-events-auto hover:fill-amber-300/30 transition-colors"
-                  onClick={() => handleCompleteAngle('obtuse')}
+                  onClick={() => handleCompleteAngle(secondaryChoice)}
                 />
               )}
               <path
-                d={obtuseD}
+                d={secondaryD}
                 stroke="#F59E0B"
                 strokeWidth={isClickable ? 4.5 : 3}
                 fill="none"
                 strokeLinecap="round"
                 className={isClickable ? 'cursor-pointer pointer-events-auto' : ''}
-                onClick={isClickable ? () => handleCompleteAngle('obtuse') : undefined}
+                onClick={isClickable ? () => handleCompleteAngle(secondaryChoice) : undefined}
               />
               {/* Dashed connector from arc to badge */}
               <line
-                x1={obtuseArcEdgeX}
-                y1={obtuseArcEdgeY}
-                x2={obtuseBadgeX}
-                y2={obtuseBadgeY}
+                x1={secondaryArcEdgeX}
+                y1={secondaryArcEdgeY}
+                x2={secondaryBadgeX}
+                y2={secondaryBadgeY}
                 stroke="#F59E0B"
                 strokeWidth={1.5}
                 strokeDasharray="3 3"
               />
-              {/* Obtuse Badge */}
+              {/* Secondary Badge */}
               <g
-                transform={`translate(${obtuseBadgeX}, ${obtuseBadgeY})`}
-                onClick={isClickable ? () => handleCompleteAngle('obtuse') : undefined}
+                transform={`translate(${secondaryBadgeX}, ${secondaryBadgeY})`}
+                onClick={isClickable ? () => handleCompleteAngle(secondaryChoice) : undefined}
                 className={isClickable ? 'cursor-pointer pointer-events-auto transition-transform hover:scale-105' : ''}
               >
                 <rect
-                  x={-55}
+                  x={-60}
                   y={-14}
-                  width={110}
+                  width={120}
                   height={28}
                   rx={14}
                   fill="#78350F"
@@ -5193,7 +5313,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   fontWeight="bold"
                   fontFamily="sans-serif"
                 >
-                  {obtuseText} {isClickable ? '▾' : ''}
+                  {secondaryText} {isClickable ? '▾' : ''}
                 </text>
               </g>
             </svg>

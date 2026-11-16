@@ -153,6 +153,14 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
     // If desiredTop wasn't clamped horizontally out of bounds, also ensure anchor hasn't scrolled far away
     void vw;
 
+    if (
+      !Number.isFinite(clamped.left) ||
+      !Number.isFinite(clamped.top) ||
+      !Number.isFinite(clamped.maxHeight)
+    ) {
+      return;
+    }
+
     const next: ClampedPopupCoords = {
       left: clamped.left,
       top: clamped.top,
@@ -170,19 +178,14 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
     );
   }, [anchorRef, placement, align, gap, respectHeader, freezePosition]);
 
+  // Only recompute synchronously when positioning inputs or parent-rendered children change,
+  // NEVER after AnchoredScreenPopup's own setCoords state update.
   useLayoutEffect(() => {
     recomputePosition();
-  });
+  }, [recomputePosition, children]);
 
   useEffect(() => {
     const popupEl = popupRef.current;
-    let ro: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(() => recomputePosition());
-      if (popupEl) ro.observe(popupEl);
-      if (anchorRef.current) ro.observe(anchorRef.current);
-    }
-
     let rafId: number | null = null;
     const scheduleSync = () => {
       if (rafId !== null) return;
@@ -191,6 +194,13 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
         recomputePosition();
       });
     };
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(scheduleSync);
+      if (popupEl) ro.observe(popupEl);
+      if (anchorRef.current) ro.observe(anchorRef.current);
+    }
 
     window.addEventListener('scroll', scheduleSync, true);
     window.addEventListener('resize', scheduleSync);
@@ -212,6 +222,9 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
         position: 'fixed',
         left: `${coords.left}px`,
         top: `${coords.top}px`,
+        right: 'auto',
+        bottom: 'auto',
+        width: 'max-content',
         maxWidth: 'calc(100vw - 16px)',
         maxHeight: `${coords.maxHeight}px`,
         visibility: coords.ready ? 'visible' : 'hidden',
