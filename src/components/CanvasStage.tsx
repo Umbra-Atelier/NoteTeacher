@@ -1,4 +1,5 @@
-import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import html2canvas from 'html2canvas';
 import {
   AngleNegativeDirection,
@@ -58,6 +59,8 @@ interface CanvasStageProps {
   mode: AppMode;
   pageId: string;
   isActivePage?: boolean;
+  isVisibleInViewport?: boolean;
+  isFullPovMode?: boolean;
   template: PaperTemplate;
   underlayTemplate?: PaperTemplate;
   povScale?: number;
@@ -291,6 +294,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   stylusConfig = { detectionMode: 'active_pen', maxTipSizePx: 14, allowMouseInput: true },
   isAudienceViewer = false,
   isActivePage = true,
+  isVisibleInViewport = true,
+  isFullPovMode = false,
   hideAudienceChrome = false,
   externalZoomScale,
   externalPanOffset,
@@ -387,6 +392,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const zoomControlRef = useRef<HTMLDivElement>(null);
   const [isZoomControlActive, setIsZoomControlActive] = useState<boolean>(false);
+  const [floatingZoomCoords, setFloatingZoomCoords] = useState<{
+    right: number;
+    bottom: number;
+    visible: boolean;
+  }>({ right: 14, bottom: 14, visible: true });
 
   const activeZoomScale = externalZoomScale ?? zoomScale;
   const activePanOffset = externalPanOffset ?? panOffset;
@@ -404,6 +414,84 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       window.removeEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
     };
   }, [isZoomControlActive]);
+
+  // Keep bottom-right zoom controls anchored on-screen in the exact same fixed viewport corner across Regular & Full POV
+  const recomputeFloatingZoomCoords = useCallback(() => {
+    if (isAudienceViewer || !isActivePage || !isVisibleInViewport) {
+      setFloatingZoomCoords((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      return;
+    }
+
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+
+    if (isFullPovMode || povScale > 1.02) {
+      setFloatingZoomCoords((prev) =>
+        prev.visible && prev.right === 14 && prev.bottom === 14
+          ? prev
+          : { right: 14, bottom: 14, visible: true }
+      );
+      return;
+    }
+
+    const container = containerRef.current;
+    if (!container) {
+      setFloatingZoomCoords((prev) =>
+        prev.visible && prev.right === 14 && prev.bottom === 14
+          ? prev
+          : { right: 14, bottom: 14, visible: true }
+      );
+      return;
+    }
+
+    const rect = container.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 68 || rect.top >= vh - 8) {
+      setFloatingZoomCoords((prev) => (prev.visible ? { ...prev, visible: false } : prev));
+      return;
+    }
+
+    const pageRightGap = vw - rect.right;
+    const computedRight = Math.max(12, Math.min(vw - 96, Math.round(pageRightGap + 12)));
+    let computedBottom = Math.max(14, Math.min(vh - 96, Math.round(vh - Math.min(vh, rect.bottom) + 12)));
+    // Avoid overlapping Regular POV bottom-right bar when narrow viewport forces it onto the right edge
+    if (pageRightGap < 112) {
+      computedBottom = Math.max(66, computedBottom);
+    }
+
+    setFloatingZoomCoords((prev) =>
+      prev.visible && prev.right === computedRight && prev.bottom === computedBottom
+        ? prev
+        : { right: computedRight, bottom: computedBottom, visible: true }
+    );
+  }, [isAudienceViewer, isActivePage, isVisibleInViewport, isFullPovMode, povScale]);
+
+  useLayoutEffect(() => {
+    recomputeFloatingZoomCoords();
+  }, [recomputeFloatingZoomCoords]);
+
+  useEffect(() => {
+    if (isAudienceViewer || !isActivePage || !isVisibleInViewport) return;
+    const scrollTarget = scrollContainerRef?.current || containerRef.current?.closest('main');
+    const el = containerRef.current;
+    let rafId: number | null = null;
+    const schedule = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        recomputeFloatingZoomCoords();
+      });
+    };
+    const ro = el ? new ResizeObserver(schedule) : null;
+    if (el && ro) ro.observe(el);
+    scrollTarget?.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      ro?.disconnect();
+      scrollTarget?.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+    };
+  }, [isAudienceViewer, isActivePage, isVisibleInViewport, scrollContainerRef, recomputeFloatingZoomCoords]);
 
   const onViewportChangeRef = useRef(onViewportChange);
   onViewportChangeRef.current = onViewportChange;
@@ -652,6 +740,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const pinchFocalStageRef = useRef<{ x: number; y: number } | null>(null);
   const isPinchingRef = useRef<boolean>(false);
   const isStylusDownRef = useRef<boolean>(false);
+  const contactingPenIdsRef = useRef<Set<number>>(new Set());
+  const lastStylusEventAtRef = useRef<number>(0);
+  const lastProcessedPointerMoveRef = useRef<Event | null>(null);
+  const activeRecoveryWindowPointerIdRef = useRef<number | null>(null);
   const activeSmartStylusPointerIdRef = useRef<number | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
   const isDrawingRef = useRef<boolean>(false);
@@ -820,7 +912,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     isDrawingRef.current = false;
     currentPointsRef.current = [];
     activePointerIdRef.current = null;
+    activeRecoveryWindowPointerIdRef.current = null;
     isStylusDownRef.current = false;
+    contactingPenIdsRef.current.clear();
     activeSmartStylusPointerIdRef.current = null;
     setIsDrawing(false);
     setCurrentPoints([]);
@@ -868,28 +962,44 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   };
 
-  // Safety reset if a pointer lifts or cancels outside the canvas layer
+  // Global pen contact tracking & safety reset if a pointer lifts or cancels outside the canvas layer
   useEffect(() => {
+    const trackPenDown = (ev: PointerEvent) => {
+      if (ev.pointerType === 'pen') {
+        contactingPenIdsRef.current.add(ev.pointerId);
+        lastStylusEventAtRef.current = Date.now();
+        isStylusDownRef.current = true;
+        isPinchingRef.current = false;
+      }
+    };
     const resetStuckPointer = (ev: PointerEvent) => {
+      if (ev.pointerType === 'pen') {
+        contactingPenIdsRef.current.delete(ev.pointerId);
+        lastStylusEventAtRef.current = Date.now();
+      }
       if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
         activeSmartStylusPointerIdRef.current = null;
+      }
+      if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
         isStylusDownRef.current = false;
       }
+      if (activeRecoveryWindowPointerIdRef.current === ev.pointerId) {
+        activeRecoveryWindowPointerIdRef.current = null;
+      }
       if (activePointerIdRef.current === ev.pointerId) {
-        if (ev.pointerType === 'pen') {
-          isStylusDownRef.current = false;
-        }
         if (isDrawingRef.current) {
           commitActiveDrawingStrokeRef.current();
         }
         activePointerIdRef.current = null;
       }
     };
-    window.addEventListener('pointerup', resetStuckPointer, { passive: true });
-    window.addEventListener('pointercancel', resetStuckPointer, { passive: true });
+    window.addEventListener('pointerdown', trackPenDown, { capture: true, passive: true });
+    window.addEventListener('pointerup', resetStuckPointer, { capture: true, passive: true });
+    window.addEventListener('pointercancel', resetStuckPointer, { capture: true, passive: true });
     return () => {
-      window.removeEventListener('pointerup', resetStuckPointer);
-      window.removeEventListener('pointercancel', resetStuckPointer);
+      window.removeEventListener('pointerdown', trackPenDown, { capture: true });
+      window.removeEventListener('pointerup', resetStuckPointer, { capture: true });
+      window.removeEventListener('pointercancel', resetStuckPointer, { capture: true });
     };
   }, []);
 
@@ -1132,18 +1242,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
     const getActiveFingerTouches = (touches: TouchList): Touch[] => {
       const list = Array.from(touches);
+      // Always exclude explicit hardware stylus contacts so resting palm + active pen never reads as 2 fingers
+      const nonStylusList = list.filter(
+        (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
+      );
       if (touchInputMode === 'two_finger_stylus') {
-        const hasStylusTouch = list.some(
-          (t) => (t as Touch & { touchType?: string }).touchType === 'stylus'
-        );
-        if (hasStylusTouch) {
-          return list.filter(
-            (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
-          );
+        if (nonStylusList.length < list.length) {
+          return nonStylusList;
         }
         if (stylusConfig.detectionMode === 'smart_tip') {
           const maxR = (stylusConfig.maxTipSizePx ?? 14) / 2;
-          return list.filter((t) => {
+          return nonStylusList.filter((t) => {
             const rx = t.radiusX || 0;
             const ry = t.radiusY || 0;
             if (rx > 0 && ry > 0 && Math.max(rx, ry) <= maxR) {
@@ -1156,13 +1265,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           (t) => typeof (t as Touch & { touchType?: string }).touchType === 'string'
         );
         if (hasTouchTypeApi) {
-          return list.filter(
-            (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
-          );
+          return nonStylusList;
         }
-        return isStylusDownRef.current ? [] : list;
+        return isStylusDownRef.current || contactingPenIdsRef.current.size > 0 ? [] : nonStylusList;
       }
-      return list;
+      return nonStylusList;
     };
 
     const handleTouchStart = (e: TouchEvent) => {
@@ -1176,8 +1283,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
-      // Never let resting palm/wrist two-touch detection abort an active pen stroke
-      if (isStylusDownRef.current || isDrawingRef.current) {
+      // Never let resting palm/wrist + pen detection abort or block an active pen stroke
+      if (
+        isStylusDownRef.current ||
+        isDrawingRef.current ||
+        contactingPenIdsRef.current.size > 0 ||
+        Date.now() - lastStylusEventAtRef.current < 220
+      ) {
         return;
       }
 
@@ -1615,9 +1727,32 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
   };
 
+  // Helper: check if a native or React pen PointerEvent is actively touching the surface
+  const isPenEventContacting = useCallback(
+    (ev: Pick<PointerEvent, 'pointerType' | 'pointerId' | 'buttons' | 'pressure'> & {
+      getCoalescedEvents?: () => PointerEvent[];
+    }): boolean => {
+      if (ev.pointerType !== 'pen') return false;
+      if (contactingPenIdsRef.current.has(ev.pointerId)) return true;
+      if ((ev.buttons & 1) !== 0 || ev.pressure > 0.001) return true;
+      if (typeof ev.getCoalescedEvents === 'function') {
+        try {
+          const coalesced = ev.getCoalescedEvents();
+          if (coalesced && coalesced.some((ce) => (ce.buttons & 1) !== 0 || ce.pressure > 0.001)) {
+            return true;
+          }
+        } catch {
+          // Ignore coalesced lookup errors
+        }
+      }
+      return false;
+    },
+    []
+  );
+
   // Stylus Detection & Palm Rejection Gate (Active Pen vs Smart Tip Passive)
   const isPointerAccepted = (
-    e: React.PointerEvent<HTMLDivElement>,
+    e: Pick<PointerEvent, 'pointerType' | 'pointerId' | 'width' | 'height' | 'pressure' | 'buttons'>,
     phase: 'down' | 'move' | 'up'
   ): boolean => {
     if (isAudienceViewer) return false;
@@ -1633,7 +1768,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (phase !== 'down' && activeSmartStylusPointerIdRef.current === e.pointerId) {
         return true;
       }
-      if (phase === 'down' || (phase === 'move' && !isDrawingRef.current && (e.buttons & 1) !== 0)) {
+      // Note: touch pointermove events never hover (every touch move is physical contact) and usually have e.buttons === 0
+      if (phase === 'down' || (phase === 'move' && !isDrawingRef.current)) {
         const contactSize = Math.max(e.width || 0, e.height || 0);
         const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
         const maxTip = stylusConfig.maxTipSizePx ?? 14;
@@ -1653,6 +1789,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // Pointer Down
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.pointerType === 'pen') {
+      contactingPenIdsRef.current.add(e.pointerId);
+      lastStylusEventAtRef.current = Date.now();
       isStylusDownRef.current = true;
       // An explicit hardware stylus contact must never be blocked by a stale pinch flag
       isPinchingRef.current = false;
@@ -1892,30 +2030,133 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
   };
 
+  // Mid-stroke recovery & drawing continuation helper (shared by React onPointerMove & window capture recovery)
+  const beginMidStrokeRecovery = useCallback(
+    (
+      pointerId: number,
+      pointerType: string,
+      clientX: number,
+      clientY: number,
+      pressure: number,
+      coalesced: PointerEvent[] | null,
+      captureTarget: HTMLElement | null,
+      markWindowRecovery: boolean
+    ) => {
+      if (!isActivePage && onActivatePage) {
+        onActivatePage();
+      }
+      setSelectedGridShapeId(null);
+      setSelectedGraphId(null);
+      setSelectedCalcId(null);
+      setSelectedImageId(null);
+      if (editingDictateBoxId) {
+        onStopManualEditDictateBox?.();
+      }
+      onClickOutsideDictateBox?.();
+
+      if (pointerType === 'pen') {
+        contactingPenIdsRef.current.add(pointerId);
+        lastStylusEventAtRef.current = Date.now();
+        isStylusDownRef.current = true;
+        isPinchingRef.current = false;
+      }
+
+      activePointerIdRef.current = pointerId;
+      if (markWindowRecovery) {
+        activeRecoveryWindowPointerIdRef.current = pointerId;
+      }
+      if (captureTarget) {
+        trySetPointerCapture(captureTarget, pointerId);
+      }
+
+      const initialPts: StrokePoint[] =
+        coalesced && coalesced.length > 0
+          ? coalesced.map((ce) => {
+              const c = getStageCoords(ce.clientX, ce.clientY);
+              return { x: c.x, y: c.y, pressure: ce.pressure || pressure };
+            })
+          : [{ ...getStageCoords(clientX, clientY), pressure }];
+
+      isDrawingRef.current = true;
+      currentPointsRef.current = initialPts;
+      setIsDrawing(true);
+      setCurrentPoints(initialPts);
+      onColorUsed(currentColor);
+    },
+    [
+      isActivePage,
+      onActivatePage,
+      editingDictateBoxId,
+      onStopManualEditDictateBox,
+      onClickOutsideDictateBox,
+      getStageCoords,
+      onColorUsed,
+      currentColor,
+    ]
+  );
+
+  const appendCoalescedDrawingPoints = useCallback(
+    (clientX: number, clientY: number, pressure: number, coalesced: PointerEvent[] | null) => {
+      if (coalesced && coalesced.length > 0) {
+        const nextPts = [...currentPointsRef.current];
+        for (let i = 0; i < coalesced.length; i++) {
+          const ce = coalesced[i];
+          const c = getStageCoords(ce.clientX, ce.clientY);
+          nextPts.push({ x: c.x, y: c.y, pressure: ce.pressure || pressure });
+        }
+        currentPointsRef.current = nextPts;
+        setCurrentPoints(nextPts);
+      } else {
+        const pt = getStageCoords(clientX, clientY);
+        const nextPts = [...currentPointsRef.current, { x: pt.x, y: pt.y, pressure }];
+        currentPointsRef.current = nextPts;
+        setCurrentPoints(nextPts);
+      }
+    },
+    [getStageCoords]
+  );
+
   // Pointer Move
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const nativeEv = e.nativeEvent as PointerEvent & {
+      getCoalescedEvents?: () => PointerEvent[];
+    };
+    if (lastProcessedPointerMoveRef.current === nativeEv) {
+      return;
+    }
+    lastProcessedPointerMoveRef.current = nativeEv;
+
     if (!isPointerAccepted(e, 'move')) {
       return;
     }
 
-    const isPenContacting =
-      e.pointerType === 'pen' && ((e.buttons & 1) !== 0 || e.pressure > 0.001);
-    const isPenHovering =
-      e.pointerType === 'pen' && (e.buttons & 1) === 0 && e.pressure <= 0.001;
+    if (e.pointerType === 'pen') {
+      lastStylusEventAtRef.current = Date.now();
+    }
+
+    const isPenContacting = isPenEventContacting(nativeEv);
+    const isPenHovering = e.pointerType === 'pen' && !isPenContacting;
 
     // If hardware pen lifted into hover and browser missed pointerup, cleanly commit the open stroke
     if (isPenHovering) {
+      contactingPenIdsRef.current.delete(e.pointerId);
+      if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+        isStylusDownRef.current = false;
+      }
+      if (activeRecoveryWindowPointerIdRef.current === e.pointerId) {
+        activeRecoveryWindowPointerIdRef.current = null;
+      }
       if (activePointerIdRef.current === e.pointerId) {
         if (isDrawingRef.current) {
           commitActiveDrawingStrokeRef.current();
         }
         activePointerIdRef.current = null;
-        isStylusDownRef.current = false;
       }
       return;
     }
 
     if (isPenContacting) {
+      contactingPenIdsRef.current.add(e.pointerId);
       isStylusDownRef.current = true;
       isPinchingRef.current = false;
       // Allow a currently drawing pen to pre-empt any stale pointerId (e.g., missed pointerup between words)
@@ -2019,77 +2260,40 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
 
     if (mode === 'drawing') {
-      // Mid-stroke pen recovery: if pointerdown was dropped/delayed/canceled (e.g. by wrist/palm rejection),
-      // immediately begin drawing as soon as the contacting pen moves so swiping never fails to write.
+      const coalesced =
+        typeof nativeEv.getCoalescedEvents === 'function'
+          ? nativeEv.getCoalescedEvents()
+          : null;
+
+      // Mid-stroke pen recovery: if pointerdown was dropped/delayed/canceled or failed size threshold initially,
+      // immediately begin drawing as soon as the contacting pen moves without waiting for lift & re-touch.
       if (!isDrawingRef.current) {
         const isSmartTipContacting =
           stylusConfig?.detectionMode === 'smart_tip' &&
           e.pointerType === 'touch' &&
-          activeSmartStylusPointerIdRef.current === e.pointerId &&
+          (touchInputMode === 'two_finger' || activeSmartStylusPointerIdRef.current === e.pointerId);
+        const isMouseContacting =
+          e.pointerType === 'mouse' &&
+          (stylusConfig?.allowMouseInput ?? true) &&
           (e.buttons & 1) !== 0;
 
-        if (isPenContacting || isSmartTipContacting) {
-          if (!isActivePage && onActivatePage) {
-            onActivatePage();
-          }
-          setSelectedGridShapeId(null);
-          setSelectedGraphId(null);
-          setSelectedCalcId(null);
-          setSelectedImageId(null);
-          if (editingDictateBoxId) {
-            onStopManualEditDictateBox?.();
-          }
-          onClickOutsideDictateBox?.();
-
-          activePointerIdRef.current = e.pointerId;
-          trySetPointerCapture(e.currentTarget, e.pointerId);
-
-          const nativeEv = e.nativeEvent as PointerEvent & {
-            getCoalescedEvents?: () => PointerEvent[];
-          };
-          const coalesced =
-            typeof nativeEv.getCoalescedEvents === 'function'
-              ? nativeEv.getCoalescedEvents()
-              : null;
-          const initialPts: StrokePoint[] =
-            coalesced && coalesced.length > 0
-              ? coalesced.map((ce) => {
-                  const c = getStageCoords(ce.clientX, ce.clientY);
-                  return { x: c.x, y: c.y, pressure: ce.pressure || pressure };
-                })
-              : [{ x, y, pressure }];
-
-          isDrawingRef.current = true;
-          currentPointsRef.current = initialPts;
-          setIsDrawing(true);
-          setCurrentPoints(initialPts);
-          onColorUsed(currentColor);
+        if (isPenContacting || isSmartTipContacting || isMouseContacting) {
+          beginMidStrokeRecovery(
+            e.pointerId,
+            e.pointerType,
+            e.clientX,
+            e.clientY,
+            pressure,
+            coalesced,
+            e.currentTarget,
+            false
+          );
           return;
         }
       }
 
       if (isDrawingRef.current) {
-        const nativeEv = e.nativeEvent as PointerEvent & {
-          getCoalescedEvents?: () => PointerEvent[];
-        };
-        const coalesced =
-          typeof nativeEv.getCoalescedEvents === 'function'
-            ? nativeEv.getCoalescedEvents()
-            : null;
-        if (coalesced && coalesced.length > 0) {
-          const nextPts = [...currentPointsRef.current];
-          for (let i = 0; i < coalesced.length; i++) {
-            const ce = coalesced[i];
-            const c = getStageCoords(ce.clientX, ce.clientY);
-            nextPts.push({ x: c.x, y: c.y, pressure: ce.pressure || pressure });
-          }
-          currentPointsRef.current = nextPts;
-          setCurrentPoints(nextPts);
-        } else {
-          const nextPts = [...currentPointsRef.current, { x, y, pressure }];
-          currentPointsRef.current = nextPts;
-          setCurrentPoints(nextPts);
-        }
+        appendCoalescedDrawingPoints(e.clientX, e.clientY, pressure, coalesced);
         return;
       }
     }
@@ -2380,9 +2584,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // Pointer Up
   const handlePointerUp = async (e: React.PointerEvent<HTMLDivElement>) => {
     const accepted = isPointerAccepted(e, 'up');
-    if (e.pointerType === 'pen' || activeSmartStylusPointerIdRef.current === e.pointerId) {
-      isStylusDownRef.current = false;
+    if (e.pointerType === 'pen') {
+      contactingPenIdsRef.current.delete(e.pointerId);
+      lastStylusEventAtRef.current = Date.now();
+    }
+    if (activeSmartStylusPointerIdRef.current === e.pointerId) {
       activeSmartStylusPointerIdRef.current = null;
+    }
+    if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+      isStylusDownRef.current = false;
+    }
+    if (activeRecoveryWindowPointerIdRef.current === e.pointerId) {
+      activeRecoveryWindowPointerIdRef.current = null;
     }
 
     if (!accepted) {
@@ -2848,11 +3061,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   // Pointer Cancel (reset stylus / gesture states cleanly without letting rejected palm touches cancel active pen ink)
   const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
-    const isTrackedPenOrSmart =
-      e.pointerType === 'pen' || activeSmartStylusPointerIdRef.current === e.pointerId;
-    if (isTrackedPenOrSmart) {
-      isStylusDownRef.current = false;
+    if (e.pointerType === 'pen') {
+      contactingPenIdsRef.current.delete(e.pointerId);
+    }
+    if (activeSmartStylusPointerIdRef.current === e.pointerId) {
       activeSmartStylusPointerIdRef.current = null;
+    }
+    if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+      isStylusDownRef.current = false;
+    }
+    if (activeRecoveryWindowPointerIdRef.current === e.pointerId) {
+      activeRecoveryWindowPointerIdRef.current = null;
     }
     if (e.pointerId !== activePointerIdRef.current) {
       return;
@@ -2900,9 +3119,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   // Lost Pointer Capture: if browser drops pointer capture before pointerup, commit active ink stroke cleanly instead of losing it
   const handleLostPointerCapture = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.pointerType === 'pen' || activeSmartStylusPointerIdRef.current === e.pointerId) {
-      isStylusDownRef.current = false;
+    if (e.pointerType === 'pen') {
+      contactingPenIdsRef.current.delete(e.pointerId);
+    }
+    if (activeSmartStylusPointerIdRef.current === e.pointerId) {
       activeSmartStylusPointerIdRef.current = null;
+    }
+    if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
+      isStylusDownRef.current = false;
+    }
+    if (activeRecoveryWindowPointerIdRef.current === e.pointerId) {
+      activeRecoveryWindowPointerIdRef.current = null;
     }
     if (e.pointerId !== activePointerIdRef.current) {
       return;
@@ -2912,6 +3139,130 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       commitActiveDrawingStrokeRef.current();
     }
   };
+
+  // Window-level mid-stroke lost-pen recovery & continuation:
+  // If an initial tap missed/failed outside .drawing-layer or lost capture before reaching .drawing-layer,
+  // catch contacting pen/stylus pointermove anywhere over the stage and start/continue drawing without requiring a lift.
+  const windowRecoveryRef = useRef<(ev: PointerEvent) => void>(() => {});
+  windowRecoveryRef.current = (ev: PointerEvent) => {
+    if (
+      isAudienceViewer ||
+      !isActivePage ||
+      !isVisibleInViewport ||
+      mode !== 'drawing' ||
+      isAnyEraseActive ||
+      isNavToolOverride ||
+      presenterMode === 'laser' ||
+      presenterMode === 'spotlight' ||
+      pendingPhotoSnippet
+    ) {
+      return;
+    }
+
+    const layer = interactionLayerRef.current;
+    if (!layer) return;
+
+    const nativeEv = ev as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
+    const isTrackedRecovery = activeRecoveryWindowPointerIdRef.current === ev.pointerId;
+
+    // When already over .drawing-layer and not a window-recovered pointer, let React handlePointerMove process normally
+    if (!isTrackedRecovery && ev.target === layer) {
+      return;
+    }
+
+    const targetEl = ev.target as HTMLElement | null;
+    if (
+      !isTrackedRecovery &&
+      targetEl?.closest(
+        'header, aside, .floating-zoom, [data-floating-zoom], .banner-prompt, [role="dialog"], [data-testid="right-edge-scrollbar"], button, input, textarea'
+      )
+    ) {
+      return;
+    }
+
+    const rect = layer.getBoundingClientRect();
+    const insideStage =
+      ev.clientX >= rect.left &&
+      ev.clientX <= rect.right &&
+      ev.clientY >= rect.top &&
+      ev.clientY <= rect.bottom;
+
+    if (!insideStage && !isTrackedRecovery) {
+      return;
+    }
+
+    const penContacting = isPenEventContacting(nativeEv);
+    if (ev.pointerType === 'pen') {
+      lastStylusEventAtRef.current = Date.now();
+      if (!penContacting) {
+        contactingPenIdsRef.current.delete(ev.pointerId);
+        if (isTrackedRecovery && isDrawingRef.current) {
+          commitActiveDrawingStrokeRef.current();
+          activeRecoveryWindowPointerIdRef.current = null;
+          activePointerIdRef.current = null;
+        }
+        return;
+      }
+    }
+
+    if (!isPointerAccepted(ev, 'move')) {
+      return;
+    }
+
+    const smartTipContacting =
+      stylusConfig?.detectionMode === 'smart_tip' &&
+      ev.pointerType === 'touch' &&
+      (touchInputMode === 'two_finger' || activeSmartStylusPointerIdRef.current === ev.pointerId);
+    const mouseContacting =
+      ev.pointerType === 'mouse' &&
+      (stylusConfig?.allowMouseInput ?? true) &&
+      (ev.buttons & 1) !== 0;
+
+    if (!penContacting && !smartTipContacting && !mouseContacting) {
+      return;
+    }
+
+    if (isPinchingRef.current && ev.pointerType !== 'pen') {
+      return;
+    }
+
+    lastProcessedPointerMoveRef.current = nativeEv;
+    const coalesced =
+      typeof nativeEv.getCoalescedEvents === 'function'
+        ? nativeEv.getCoalescedEvents()
+        : null;
+    const pressure = ev.pressure || 0.5;
+
+    if (!isDrawingRef.current) {
+      beginMidStrokeRecovery(
+        ev.pointerId,
+        ev.pointerType,
+        ev.clientX,
+        ev.clientY,
+        pressure,
+        coalesced,
+        layer,
+        true
+      );
+      return;
+    }
+
+    if (
+      activeRecoveryWindowPointerIdRef.current === ev.pointerId ||
+      activePointerIdRef.current === ev.pointerId
+    ) {
+      appendCoalescedDrawingPoints(ev.clientX, ev.clientY, pressure, coalesced);
+    }
+  };
+
+  useEffect(() => {
+    if (isAudienceViewer || !isActivePage || !isVisibleInViewport || mode !== 'drawing') return;
+    const onWinMove = (ev: PointerEvent) => windowRecoveryRef.current(ev);
+    window.addEventListener('pointermove', onWinMove, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener('pointermove', onWinMove, { capture: true });
+    };
+  }, [isAudienceViewer, isActivePage, isVisibleInViewport, mode]);
 
   // Magic Grab Compass Handle: Click & Hold 400ms or drag to smoothly move items
   const [isCompassRepositioning, setIsCompassRepositioning] = useState(false);
@@ -3355,47 +3706,59 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         isAudienceViewer ? 'pointer-events-none' : ''
       }`}
     >
-      {/* PENDING PHOTO SNIPPET BANNER */}
-      {pendingPhotoSnippet && isActivePage && (
-        <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] bg-indigo-600 text-white px-4 py-2 rounded-full shadow-2xl flex items-center gap-3 animate-bounce max-w-[92vw]">
-          <Camera className="w-4 h-4 text-indigo-200 shrink-0" />
-          <span className="text-xs font-bold tracking-wide truncate">
-            Photo snippet ready! Click anywhere on page to place it.
-          </span>
-          <button
-            type="button"
-            onClick={() => setPendingPhotoSnippet(null)}
-            className="p-1 hover:bg-indigo-700 rounded-full shrink-0"
-            title="Cancel"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
+      {/* PENDING PHOTO SNIPPET BANNER (Portaled to body so Full POV transform never shifts or clips it) */}
+      {!isAudienceViewer &&
+        pendingPhotoSnippet &&
+        isActivePage &&
+        isVisibleInViewport &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] bg-indigo-600 text-white px-4 py-2 rounded-full shadow-2xl flex items-center gap-3 animate-bounce max-w-[92vw] pointer-events-auto">
+            <Camera className="w-4 h-4 text-indigo-200 shrink-0" />
+            <span className="text-xs font-bold tracking-wide truncate">
+              Photo snippet ready! Click anywhere on page to place it.
+            </span>
+            <button
+              type="button"
+              onClick={() => setPendingPhotoSnippet(null)}
+              className="p-1 hover:bg-indigo-700 rounded-full shrink-0"
+              title="Cancel"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>,
+          document.body
+        )}
 
-      {/* ANGLE TOOL HELPER BANNER */}
-      {angleStep !== 'idle' && isActivePage && (
-        <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] bg-blue-600 text-white px-5 py-2.5 rounded-full shadow-2xl flex items-center gap-3 animate-in fade-in max-w-[92vw]">
-          <Compass className="w-4 h-4 text-blue-200 shrink-0" />
-          <span className="text-xs font-bold tracking-wide truncate">
-            {angleStep === 'circle_drag' && 'Release pointer to lock circle size'}
-            {angleStep === 'ray1_drag' && 'Drag blue terminal ray to orient 1st direction, then release'}
-            {angleStep === 'ray2_drag' && 'Drag red terminal ray to orient 2nd direction, then release'}
-            {angleStep === 'sector_select' && 'Click either the Acute or Obtuse arc button to keep that angle'}
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              setAngleStep('idle');
-              setAngleCenter(null);
-            }}
-            className="p-1 hover:bg-blue-700 rounded-full transition-colors shrink-0"
-            title="Cancel Angle Tool"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
+      {/* ANGLE TOOL HELPER BANNER (Portaled to body so Full POV transform never shifts or clips it) */}
+      {!isAudienceViewer &&
+        angleStep !== 'idle' &&
+        isActivePage &&
+        isVisibleInViewport &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] bg-blue-600 text-white px-5 py-2.5 rounded-full shadow-2xl flex items-center gap-3 animate-in fade-in max-w-[92vw] pointer-events-auto">
+            <Compass className="w-4 h-4 text-blue-200 shrink-0" />
+            <span className="text-xs font-bold tracking-wide truncate">
+              {angleStep === 'circle_drag' && 'Release pointer to lock circle size'}
+              {angleStep === 'ray1_drag' && 'Drag blue terminal ray to orient 1st direction, then release'}
+              {angleStep === 'ray2_drag' && 'Drag red terminal ray to orient 2nd direction, then release'}
+              {angleStep === 'sector_select' && 'Click either the Acute or Obtuse arc button to keep that angle'}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setAngleStep('idle');
+                setAngleCenter(null);
+              }}
+              className="p-1 hover:bg-blue-700 rounded-full transition-colors shrink-0"
+              title="Cancel Angle Tool"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>,
+          document.body
+        )}
 
       {/* ZOOMABLE & PANNABLE WORKSPACE WRAPPER */}
       <div
@@ -4857,91 +5220,102 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         />
       )}
 
-      {/* 8.5 TOUCH CONTROLS LEFT FLOATING TOOLBAR (Only on Active Page) */}
-      {!isAudienceViewer && isActivePage && touchInputMode === 'stylus_and_hand' && (
-        <aside
-          aria-label="Stylus Navigation Controls"
-          className="fixed left-3 top-1/2 -translate-y-1/2 z-50 flex flex-col items-center gap-2 p-1.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-300 dark:border-slate-700 select-none pointer-events-auto"
-        >
-          {/* Tool 1: Default Pointer (regular stylus function) */}
-          <button
-            type="button"
-            title="Stylus Default Tool: Draw, select, and interact normally (ignoring palm/wrist touches)"
-            onClick={() => setLeftToolbarTool('pointer')}
-            className={`p-2 rounded-xl transition-all ${
-              leftToolbarTool === 'pointer'
-                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-400'
-                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
+      {/* 8.5 TOUCH CONTROLS LEFT FLOATING TOOLBAR (Portaled to body so Full POV scale/scroll never shifts it) */}
+      {!isAudienceViewer &&
+        isActivePage &&
+        isVisibleInViewport &&
+        touchInputMode === 'stylus_and_hand' &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <aside
+            aria-label="Stylus Navigation Controls"
+            className="fixed left-3 top-1/2 -translate-y-1/2 z-[9990] flex flex-col items-center gap-2 p-1.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-300 dark:border-slate-700 select-none pointer-events-auto"
           >
-            <MousePointer className="w-5 h-5" />
-          </button>
+            {/* Tool 1: Default Pointer (regular stylus function) */}
+            <button
+              type="button"
+              title="Stylus Default Tool: Draw, select, and interact normally (ignoring palm/wrist touches)"
+              onClick={() => setLeftToolbarTool('pointer')}
+              className={`p-2 rounded-xl transition-all ${
+                leftToolbarTool === 'pointer'
+                  ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-400'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <MousePointer className="w-5 h-5" />
+            </button>
 
-          {/* Tool 2: Stylus Zoom Tool */}
-          <button
-            type="button"
-            title="Stylus Zoom Tool: Tap to select zoom point; drag towards + / - or drag away to zoom into that point"
-            onClick={() => setLeftToolbarTool('zoom')}
-            className={`p-2 rounded-xl transition-all ${
-              leftToolbarTool === 'zoom'
-                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-400'
-                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
+            {/* Tool 2: Stylus Zoom Tool */}
+            <button
+              type="button"
+              title="Stylus Zoom Tool: Tap to select zoom point; drag towards + / - or drag away to zoom into that point"
+              onClick={() => setLeftToolbarTool('zoom')}
+              className={`p-2 rounded-xl transition-all ${
+                leftToolbarTool === 'zoom'
+                  ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-400'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <ZoomIn className="w-5 h-5" />
+            </button>
+
+            {/* Tool 3: Change POV Tool */}
+            <button
+              type="button"
+              title="Change POV Tool: Drag stylus on page to pan canvas view"
+              onClick={() => setLeftToolbarTool('pan')}
+              className={`p-2 rounded-xl transition-all ${
+                leftToolbarTool === 'pan'
+                  ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-400'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Hand className="w-5 h-5" />
+            </button>
+          </aside>,
+          document.body
+        )}
+
+      {/* 8.6 DYNAMIC STYLUS ZOOM HUD INDICATOR (Portaled to body for accurate viewport alignment in Full POV) */}
+      {!isAudienceViewer &&
+        isActivePage &&
+        stylusZoomAnchor &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            style={{
+              left: `${stylusZoomAnchor.clientX}px`,
+              top: `${stylusZoomAnchor.clientY}px`,
+            }}
+            className="fixed -translate-x-1/2 -translate-y-1/2 z-[10050] pointer-events-none select-none flex items-center justify-center"
           >
-            <ZoomIn className="w-5 h-5" />
-          </button>
+            {/* Dynamic connector line */}
+            <div className="absolute w-36 h-0.5 bg-blue-500/60 rounded-full" />
 
-          {/* Tool 3: Change POV Tool */}
-          <button
-            type="button"
-            title="Change POV Tool: Drag stylus on page to pan canvas view"
-            onClick={() => setLeftToolbarTool('pan')}
-            className={`p-2 rounded-xl transition-all ${
-              leftToolbarTool === 'pan'
-                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-400'
-                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-            }`}
-          >
-            <Hand className="w-5 h-5" />
-          </button>
-        </aside>
-      )}
+            {/* Left Zoom Out (-) badge */}
+            <div className="absolute -left-16 flex items-center gap-1 px-2.5 py-1 bg-slate-900/90 text-white rounded-full shadow-lg border border-white/20 text-xs font-bold backdrop-blur-xs">
+              <span>−</span>
+              <span className="text-[10px] text-slate-300">Out</span>
+            </div>
 
-      {/* 8.6 DYNAMIC STYLUS ZOOM HUD INDICATOR */}
-      {!isAudienceViewer && stylusZoomAnchor && (
-        <div
-          style={{
-            left: `${stylusZoomAnchor.clientX}px`,
-            top: `${stylusZoomAnchor.clientY}px`,
-          }}
-          className="fixed -translate-x-1/2 -translate-y-1/2 z-[9999] pointer-events-none select-none flex items-center justify-center"
-        >
-          {/* Dynamic connector line */}
-          <div className="absolute w-36 h-0.5 bg-blue-500/60 rounded-full" />
+            {/* Center Target Dot */}
+            <div className="w-8 h-8 rounded-full border-2 border-blue-500 bg-blue-500/20 flex items-center justify-center animate-pulse">
+              <div className="w-2.5 h-2.5 rounded-full bg-blue-600" />
+            </div>
 
-          {/* Left Zoom Out (-) badge */}
-          <div className="absolute -left-16 flex items-center gap-1 px-2.5 py-1 bg-slate-900/90 text-white rounded-full shadow-lg border border-white/20 text-xs font-bold backdrop-blur-xs">
-            <span>−</span>
-            <span className="text-[10px] text-slate-300">Out</span>
-          </div>
+            {/* Right Zoom In (+) badge */}
+            <div className="absolute -right-16 flex items-center gap-1 px-2.5 py-1 bg-slate-900/90 text-white rounded-full shadow-lg border border-white/20 text-xs font-bold backdrop-blur-xs">
+              <span>+</span>
+              <span className="text-[10px] text-slate-300">In</span>
+            </div>
 
-          {/* Center Target Dot */}
-          <div className="w-8 h-8 rounded-full border-2 border-blue-500 bg-blue-500/20 flex items-center justify-center animate-pulse">
-            <div className="w-2.5 h-2.5 rounded-full bg-blue-600" />
-          </div>
-
-          {/* Right Zoom In (+) badge */}
-          <div className="absolute -right-16 flex items-center gap-1 px-2.5 py-1 bg-slate-900/90 text-white rounded-full shadow-lg border border-white/20 text-xs font-bold backdrop-blur-xs">
-            <span>+</span>
-            <span className="text-[10px] text-slate-300">In</span>
-          </div>
-
-          {/* Current Zoom Level */}
-          <div className="absolute top-7 px-2 py-0.5 bg-blue-600 text-white rounded-md text-[11px] font-mono font-bold shadow-md">
-            {Math.round(zoomScale * 100)}%
-          </div>
-        </div>
-      )}
+            {/* Current Zoom Level */}
+            <div className="absolute top-7 px-2 py-0.5 bg-blue-600 text-white rounded-md text-[11px] font-mono font-bold shadow-md">
+              {Math.round(zoomScale * 100)}%
+            </div>
+          </div>,
+          document.body
+        )}
 
       {/* 9. CLASSROOM PRESENTER OVERLAY */}
       <PresenterOverlay
@@ -4952,85 +5326,97 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         onStateChange={onPresenterStateChange}
       />
 
-      {/* 10. FLOATING ZOOM CONTROLS (Transparent with no box underneath when idle; opaque on use) */}
-      {!isAudienceViewer && (
-        <div
-          ref={zoomControlRef}
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            setIsZoomControlActive(true);
-          }}
-          onTouchStart={(e) => e.stopPropagation()}
-          className={`floating-zoom pointer-events-auto absolute bottom-3 right-3 z-40 flex items-center gap-1 px-2 py-1 rounded-full border text-xs select-none transition-opacity duration-150 ${
-            isZoomControlActive
-              ? 'opacity-100 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg'
-              : 'opacity-25 hover:opacity-70 bg-transparent border-transparent shadow-none'
-          }`}
-        >
-          <button
-            type="button"
-            title="Zoom Out"
-            onClick={(e) => {
+      {/* 10. FLOATING ZOOM CONTROLS (Portaled & viewport-fixed so they stay in the exact same screen corner in Full POV; transparent with no box underneath when idle) */}
+      {!isAudienceViewer &&
+        isActivePage &&
+        isVisibleInViewport &&
+        floatingZoomCoords.visible &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={zoomControlRef}
+            data-floating-zoom="true"
+            style={{
+              position: 'fixed',
+              right: `${floatingZoomCoords.right}px`,
+              bottom: `${floatingZoomCoords.bottom}px`,
+            }}
+            onPointerDown={(e) => {
               e.stopPropagation();
               setIsZoomControlActive(true);
-              setZoomScale((prev) => Math.max(0.6, prev - 0.25));
             }}
-            className={`p-1 rounded-full text-slate-700 dark:text-slate-200 ${
-              isZoomControlActive ? 'hover:bg-slate-100 dark:hover:bg-slate-700' : ''
+            onTouchStart={(e) => e.stopPropagation()}
+            className={`floating-zoom pointer-events-auto z-[9990] flex items-center gap-1 px-2 py-1 rounded-full border text-xs select-none transition-opacity duration-150 ${
+              isZoomControlActive
+                ? 'opacity-100 bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 shadow-lg'
+                : 'opacity-25 hover:opacity-70 bg-transparent border-transparent shadow-none'
             }`}
           >
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Zoom Controls"
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsZoomControlActive(true);
-            }}
-            className="font-mono text-[11px] font-bold text-slate-700 dark:text-slate-200 w-11 text-center"
-          >
-            {Math.round(zoomScale * 100)}%
-          </button>
-
-          <button
-            type="button"
-            title="Zoom In"
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsZoomControlActive(true);
-              setZoomScale((prev) => Math.min(3.5, prev + 0.25));
-            }}
-            className={`p-1 rounded-full text-slate-700 dark:text-slate-200 ${
-              isZoomControlActive ? 'hover:bg-slate-100 dark:hover:bg-slate-700' : ''
-            }`}
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
-
-          {zoomScale !== 1 && (
             <button
               type="button"
-              title="Reset Zoom & Pan (100%)"
+              title="Zoom Out"
               onClick={(e) => {
                 e.stopPropagation();
                 setIsZoomControlActive(true);
-                setZoomScale(1);
-                setPanOffset({ x: 0, y: 0 });
+                setZoomScale((prev) => Math.max(0.6, prev - 0.25));
               }}
-              className={`flex items-center gap-1 px-1.5 py-0.5 ml-1 rounded-full text-[10px] font-medium text-slate-700 dark:text-slate-200 ${
-                isZoomControlActive
-                  ? 'bg-slate-100 dark:bg-slate-700 hover:bg-blue-50 hover:text-blue-600'
-                  : 'bg-transparent'
+              className={`p-1 rounded-full text-slate-700 dark:text-slate-200 ${
+                isZoomControlActive ? 'hover:bg-slate-100 dark:hover:bg-slate-700' : ''
               }`}
             >
-              <RotateCcw className="w-3 h-3" />
-              <span>Reset</span>
+              <ZoomOut className="w-3.5 h-3.5" />
             </button>
-          )}
-        </div>
-      )}
+
+            <button
+              type="button"
+              title="Zoom Controls"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsZoomControlActive(true);
+              }}
+              className="font-mono text-[11px] font-bold text-slate-700 dark:text-slate-200 w-11 text-center"
+            >
+              {Math.round(zoomScale * 100)}%
+            </button>
+
+            <button
+              type="button"
+              title="Zoom In"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsZoomControlActive(true);
+                setZoomScale((prev) => Math.min(3.5, prev + 0.25));
+              }}
+              className={`p-1 rounded-full text-slate-700 dark:text-slate-200 ${
+                isZoomControlActive ? 'hover:bg-slate-100 dark:hover:bg-slate-700' : ''
+              }`}
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
+
+            {zoomScale !== 1 && (
+              <button
+                type="button"
+                title="Reset Zoom & Pan (100%)"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsZoomControlActive(true);
+                  setZoomScale(1);
+                  setPanOffset({ x: 0, y: 0 });
+                }}
+                className={`flex items-center gap-1 px-1.5 py-0.5 ml-1 rounded-full text-[10px] font-medium text-slate-700 dark:text-slate-200 ${
+                  isZoomControlActive
+                    ? 'bg-slate-100 dark:bg-slate-700 hover:bg-blue-50 hover:text-blue-600'
+                    : 'bg-transparent'
+                }`}
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset</span>
+              </button>
+            )}
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

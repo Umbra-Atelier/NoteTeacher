@@ -666,16 +666,10 @@ export default function App() {
     if (!mainEl || isViewerTab) return;
 
     const filterAllowedTouches = (touches: TouchList): Touch[] => {
-      const list = Array.from(touches);
+      const list = Array.from(touches).filter(
+        (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
+      );
       if (touchInputMode === 'two_finger_stylus') {
-        const hasStylusTouch = list.some(
-          (t) => (t as Touch & { touchType?: string }).touchType === 'stylus'
-        );
-        if (hasStylusTouch) {
-          return list.filter(
-            (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
-          );
-        }
         if (stylusConfig.detectionMode === 'smart_tip') {
           const maxR = (stylusConfig.maxTipSizePx ?? 14) / 2;
           return list.filter((t) => {
@@ -750,11 +744,22 @@ export default function App() {
   const teacherViewportSizeRef = useRef(teacherViewportSize);
   teacherViewportSizeRef.current = teacherViewportSize;
 
+  const mainViewportSizeRef = useRef(mainViewportSize);
+  mainViewportSizeRef.current = mainViewportSize;
+  const isFullPovModeRef = useRef(isFullPovMode);
+  isFullPovModeRef.current = isFullPovMode;
+  const povZoomFactorRef = useRef(povZoomFactor);
+  povZoomFactorRef.current = povZoomFactor;
+
   const [cameraView, setCameraView] = useState<CameraViewportState>({
     zoomScale: 1,
     panOffset: { x: 0, y: 0 },
     viewportWidth: 0,
     viewportHeight: 0,
+    isFullPovMode: false,
+    povZoomFactor: 1,
+    povScale: 1,
+    povScrollYFraction: 0.5,
   });
   const cameraViewRef = useRef(cameraView);
   cameraViewRef.current = cameraView;
@@ -925,7 +930,128 @@ export default function App() {
     });
   }, [pages, currentPageId, isViewerTab]);
 
-  // Track exact pixel dimensions of Teacher's active page sheet container
+  // Helper to compute exact Teacher camera + Full POV + vertical scroll fraction payload
+  const buildCameraSyncPayload = useCallback(
+    (zoomScale: number, panOffset: { x: number; y: number }): CameraViewportState => {
+      const allPages = pagesRef.current;
+      const curId = currentPageIdRef.current;
+      const page = allPages.find((p) => p.id === curId) || allPages[0];
+      const aspect =
+        page?.aspectRatio && page.aspectRatio > 0
+          ? page.aspectRatio
+          : page?.pdfWidth && page?.pdfHeight && page.pdfHeight > 0
+          ? page.pdfWidth / page.pdfHeight
+          : 8.5 / 11;
+
+      const mv = mainViewportSizeRef.current;
+      const mainW = Math.max(320, mv.width);
+      const mainH = Math.max(320, mv.height);
+      const regularHorizPad = mainW >= 640 ? 112 : 88;
+      const availRegularW = Math.max(240, mainW - regularHorizPad);
+      const availRegularH = Math.max(320, mainH - 48);
+      const regularWidthPx = Math.max(220, Math.min(availRegularW, availRegularH * aspect));
+      const fullWidthPx = Math.max(regularWidthPx, mainW);
+      const fullPov = isFullPovModeRef.current;
+      const zoomFac = povZoomFactorRef.current;
+      const baseScale = fullPov ? fullWidthPx / regularWidthPx : 1;
+      const maxRegularFactor = fullWidthPx / regularWidthPx;
+      const clampedFactor = fullPov ? zoomFac : Math.min(maxRegularFactor, Math.max(0.75, zoomFac));
+      const povScale = baseScale * clampedFactor;
+
+      const el = pageRefsMapRef.current.get(curId) || document.getElementById('document-sheet');
+      const vw =
+        el?.clientWidth ||
+        Math.round(regularWidthPx * povScale) ||
+        teacherViewportSizeRef.current.width ||
+        0;
+      const vh =
+        el?.clientHeight ||
+        Math.round((regularWidthPx / aspect) * povScale) ||
+        teacherViewportSizeRef.current.height ||
+        0;
+
+      let povScrollYFraction = 0.5;
+      const mainEl = mainScrollRef.current;
+      if (el && mainEl) {
+        const elRect = el.getBoundingClientRect();
+        const mRect = mainEl.getBoundingClientRect();
+        const overflowY = elRect.height - mRect.height;
+        if (overflowY > 1) {
+          const offsetY = Math.max(0, Math.min(overflowY, mRect.top - elRect.top));
+          povScrollYFraction = offsetY / overflowY;
+        }
+      }
+
+      return {
+        zoomScale,
+        panOffset,
+        viewportWidth: vw,
+        viewportHeight: vh,
+        isFullPovMode: fullPov,
+        povZoomFactor: clampedFactor,
+        povScale,
+        stageWidth: regularWidthPx,
+        stageHeight: regularWidthPx / aspect,
+        povScrollYFraction,
+      };
+    },
+    []
+  );
+
+  const syncCameraNow = useCallback(
+    (overrideZoom?: number, overridePan?: { x: number; y: number }) => {
+      if (isViewerTab) return;
+      const prev = cameraViewRef.current;
+      const nextCamera = buildCameraSyncPayload(
+        overrideZoom ?? prev.zoomScale,
+        overridePan ?? prev.panOffset
+      );
+
+      const unchanged =
+        Math.abs(prev.zoomScale - nextCamera.zoomScale) < 0.0001 &&
+        Math.abs(prev.panOffset.x - nextCamera.panOffset.x) < 0.01 &&
+        Math.abs(prev.panOffset.y - nextCamera.panOffset.y) < 0.01 &&
+        prev.viewportWidth === nextCamera.viewportWidth &&
+        prev.viewportHeight === nextCamera.viewportHeight &&
+        Boolean(prev.isFullPovMode) === Boolean(nextCamera.isFullPovMode) &&
+        Math.abs((prev.povZoomFactor ?? 1) - (nextCamera.povZoomFactor ?? 1)) < 0.0005 &&
+        Math.abs((prev.povScale ?? 1) - (nextCamera.povScale ?? 1)) < 0.0005 &&
+        Math.abs((prev.stageWidth ?? 0) - (nextCamera.stageWidth ?? 0)) < 0.5 &&
+        Math.abs((prev.stageHeight ?? 0) - (nextCamera.stageHeight ?? 0)) < 0.5 &&
+        Math.abs((prev.povScrollYFraction ?? 0.5) - (nextCamera.povScrollYFraction ?? 0.5)) < 0.002;
+
+      if (unchanged) return;
+
+      cameraViewRef.current = nextCamera;
+      setCameraView(nextCamera);
+      postSyncMessageSafe(syncChannelRef.current, { type: 'sync_camera', payload: nextCamera });
+
+      if (backupCameraTimerRef.current) {
+        window.clearTimeout(backupCameraTimerRef.current);
+      }
+      backupCameraTimerRef.current = window.setTimeout(() => {
+        backupCameraTimerRef.current = null;
+        const cur = latestSyncStateRef.current;
+        const hydratedPages = cur.pages.map((p) => {
+          if (p.id !== cur.currentPageId || p.template !== 'pdf') return p;
+          const cached = getCachedFullPdfPageUrl(p);
+          return cached && p.pdfDataUrl !== cached ? { ...p, pdfDataUrl: cached } : p;
+        });
+        const snap: LivestreamDocumentState = {
+          ...cur,
+          pages: hydratedPages,
+          graphs: syncLiveDesmosBoxes(cur.graphs),
+          cameraView: nextCamera,
+          updatedAt: Date.now(),
+        };
+        void saveLivestreamSnapshotToDb(snap);
+        saveSmallLocalStorageBackup(snap);
+      }, 180);
+    },
+    [isViewerTab, buildCameraSyncPayload]
+  );
+
+  // Track exact pixel dimensions & POV state of Teacher's active page sheet container
   const isCurrentPageVisible = visiblePageIds.has(currentPageId);
   useEffect(() => {
     if (isViewerTab) return;
@@ -939,13 +1065,8 @@ export default function App() {
         setTeacherViewportSize((prev) =>
           prev.width === w && prev.height === h ? prev : { width: w, height: h }
         );
-        setCameraView((prev) => {
-          if (prev.viewportWidth === w && prev.viewportHeight === h) return prev;
-          const next: CameraViewportState = { ...prev, viewportWidth: w, viewportHeight: h };
-          postSyncMessageSafe(syncChannelRef.current, { type: 'sync_camera', payload: next });
-          return next;
-        });
       }
+      syncCameraNow();
     };
 
     updateSize();
@@ -956,7 +1077,7 @@ export default function App() {
       ro.disconnect();
       window.removeEventListener('resize', updateSize);
     };
-  }, [isViewerTab, currentPageId, isCurrentPageVisible, pages]);
+  }, [isViewerTab, currentPageId, isCurrentPageVisible, pages, isFullPovMode, povZoomFactor, mainViewportSize, syncCameraNow]);
 
   // Track Audience Viewer tab window resize / fullscreen changes
   useEffect(() => {
@@ -1265,55 +1386,9 @@ export default function App() {
   // Stream instant zoom & pan changes from Teacher CanvasStage to Audience View
   const handleViewportChange = useCallback(
     (zoomScale: number, panOffset: { x: number; y: number }) => {
-      const el =
-        pageRefsMapRef.current.get(currentPageIdRef.current) ||
-        document.getElementById('document-sheet');
-      const vw = el?.clientWidth || teacherViewportSizeRef.current.width || 0;
-      const vh = el?.clientHeight || teacherViewportSizeRef.current.height || 0;
-
-      const prev = cameraViewRef.current;
-      if (
-        Math.abs(prev.zoomScale - zoomScale) < 0.0001 &&
-        Math.abs(prev.panOffset.x - panOffset.x) < 0.01 &&
-        Math.abs(prev.panOffset.y - panOffset.y) < 0.01 &&
-        prev.viewportWidth === vw &&
-        prev.viewportHeight === vh
-      ) {
-        return;
-      }
-
-      const nextCamera: CameraViewportState = {
-        zoomScale,
-        panOffset,
-        viewportWidth: vw,
-        viewportHeight: vh,
-      };
-      setCameraView(nextCamera);
-      postSyncMessageSafe(syncChannelRef.current, { type: 'sync_camera', payload: nextCamera });
-
-      if (backupCameraTimerRef.current) {
-        window.clearTimeout(backupCameraTimerRef.current);
-      }
-      backupCameraTimerRef.current = window.setTimeout(() => {
-        backupCameraTimerRef.current = null;
-        const cur = latestSyncStateRef.current;
-        const hydratedPages = cur.pages.map((p) => {
-          if (p.id !== cur.currentPageId || p.template !== 'pdf') return p;
-          const cached = getCachedFullPdfPageUrl(p);
-          return cached && p.pdfDataUrl !== cached ? { ...p, pdfDataUrl: cached } : p;
-        });
-        const snap: LivestreamDocumentState = {
-          ...cur,
-          pages: hydratedPages,
-          graphs: syncLiveDesmosBoxes(cur.graphs),
-          cameraView: nextCamera,
-          updatedAt: Date.now(),
-        };
-        void saveLivestreamSnapshotToDb(snap);
-        saveSmallLocalStorageBackup(snap);
-      }, 180);
+      syncCameraNow(zoomScale, panOffset);
     },
-    []
+    [syncCameraNow]
   );
 
   // Stream live in-progress ink/shapes/angles/marquee overlays to Audience View
@@ -3356,26 +3431,56 @@ export default function App() {
     const fallbackW = fallbackH * pageAspectRatio;
     const frameW = cameraView.viewportWidth > 0 ? cameraView.viewportWidth : fallbackW;
     const frameH = cameraView.viewportHeight > 0 ? cameraView.viewportHeight : fallbackH;
+    const povScaleSynced = cameraView.povScale && cameraView.povScale > 0 ? cameraView.povScale : 1;
+    const stageW =
+      cameraView.stageWidth && cameraView.stageWidth > 0
+        ? cameraView.stageWidth
+        : frameW / povScaleSynced;
+    const stageH =
+      cameraView.stageHeight && cameraView.stageHeight > 0
+        ? cameraView.stageHeight
+        : frameH / povScaleSynced;
 
-    const fitScale = Math.min(
-      viewerWindowSize.width / Math.max(1, frameW),
-      viewerWindowSize.height / Math.max(1, frameH)
+    const regularFitScale = Math.min(
+      viewerWindowSize.width / Math.max(1, stageW),
+      viewerWindowSize.height / Math.max(1, stageH)
     );
+    const isFullPovSynced = Boolean(cameraView.isFullPovMode);
+    const syncedPovZoom =
+      cameraView.povZoomFactor && cameraView.povZoomFactor > 0 ? cameraView.povZoomFactor : 1;
+
+    // Reflect Full POV mode cleanly: fill audience screen width edge-to-edge while preserving aspect ratio
+    // and following the teacher's vertical scroll position; in Regular POV, mirror pinch-POV zoom smoothly.
+    const fitScale = isFullPovSynced
+      ? (viewerWindowSize.width / Math.max(1, stageW)) * syncedPovZoom
+      : regularFitScale * povScaleSynced;
+
+    const scaledW = stageW * fitScale;
+    const scaledH = stageH * fitScale;
+    const frameLeft = (viewerWindowSize.width - scaledW) / 2;
+    const frameTop =
+      scaledH > viewerWindowSize.height
+        ? -Math.max(0, Math.min(1, cameraView.povScrollYFraction ?? 0)) *
+          (scaledH - viewerWindowSize.height)
+        : (viewerWindowSize.height - scaledH) / 2;
 
     return (
-      <div className="h-screen w-screen bg-black flex items-center justify-center relative overflow-hidden select-none">
-        {/* Exact Teacher Viewport Frame scaled uniformly with letterbox/pillarbox borders */}
+      <div className="h-screen w-screen bg-black relative overflow-hidden select-none">
+        {/* Exact Teacher Viewport Frame reflecting Regular vs Full POV framing & scroll position */}
         <div
           style={{
-            width: `${frameW * fitScale}px`,
-            height: `${frameH * fitScale}px`,
+            position: 'absolute',
+            left: `${frameLeft}px`,
+            top: `${frameTop}px`,
+            width: `${scaledW}px`,
+            height: `${scaledH}px`,
           }}
-          className="relative overflow-hidden shadow-2xl bg-white dark:bg-slate-900"
+          className="overflow-hidden shadow-2xl bg-white dark:bg-slate-900"
         >
           <div
             style={{
-              width: `${frameW}px`,
-              height: `${frameH}px`,
+              width: `${stageW}px`,
+              height: `${stageH}px`,
               transform: `scale(${fitScale})`,
               transformOrigin: 'top left',
             }}
@@ -3642,6 +3747,7 @@ export default function App() {
           ref={mainScrollRef}
           onScroll={() => {
             updateScrollPageIndicator();
+            syncCameraNow();
             if (Date.now() - lastRightEdgeInputAtRef.current < 1500) {
               setIsRightScrollbarVisible(true);
             }

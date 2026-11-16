@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Trash2, Eraser, AlertTriangle, X, Check, ArrowRight, ArrowLeft } from 'lucide-react';
 
 export type ClearActionType = 'clear_page_elements' | 'clear_all_elements' | 'delete_page';
@@ -52,10 +53,12 @@ export const ClearPageModal: React.FC<ClearPageModalProps> = ({
     onClose();
   };
 
-  return (
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
     <div
       onClick={handleClose}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in select-none"
+      className="fixed inset-0 z-[10002] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in select-none"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -221,6 +224,7 @@ export const ClearPageModal: React.FC<ClearPageModalProps> = ({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

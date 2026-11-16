@@ -30,6 +30,12 @@ export interface CameraViewportState {
   panOffset: { x: number; y: number };
   viewportWidth: number;
   viewportHeight: number;
+  isFullPovMode?: boolean;
+  povZoomFactor?: number;
+  povScale?: number;
+  stageWidth?: number;
+  stageHeight?: number;
+  povScrollYFraction?: number;
 }
 
 export type PenType = 'pencil' | 'pen' | 'highlighter' | 'eraser';

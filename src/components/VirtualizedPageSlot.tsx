@@ -534,6 +534,8 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
           <CanvasStage
             mode={mode}
             isActivePage={isActivePage}
+            isVisibleInViewport={isVisibleInViewport}
+            isFullPovMode={isFullPovMode}
             touchInputMode={touchInputMode}
             stylusConfig={stylusConfig}
             scrollContainerRef={scrollContainerRef}
