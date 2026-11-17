@@ -107,7 +107,7 @@ export const TUTORIAL_STEPS: TutorialStepConfig[] = [
     category: 'Geometry',
     title: 'Shapes, Grids & 0°–359° Angle Tool',
     description:
-      'Build rectangles, arrows, dashed outlines, fillable shapes, and snap-to-grid coordinate axes—plus an interactive protractor supporting Degrees, Radians, and negative sweeps up to 359°.',
+      'Build crisp shapes with a 1–24px size slider and independent mode color memory, click any grid’s X×Y dimension badge to set exact columns and rows via the on-screen keyboard, or measure 0°–359° angles in Degrees or Radians.',
     targetSelector: '[data-tour-id="geometric-tools"]',
     switchMode: 'geometric',
     shapeType: 'angle',

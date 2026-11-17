@@ -735,7 +735,7 @@ function drawFreehandStroke(
   isClean: boolean
 ) {
   if (isClean && s.isGhosted) return;
-  if (!s.points || s.points.length < 2) return;
+  if (!s.points || s.points.length < 1) return;
 
   ctx.save();
   ctx.lineCap = 'round';
@@ -744,20 +744,38 @@ function drawFreehandStroke(
   if (s.isGhosted) {
     ctx.globalAlpha = 0.25;
     ctx.strokeStyle = '#DC2626';
+    ctx.fillStyle = '#DC2626';
     ctx.setLineDash([4 * avgScale, 4 * avgScale]);
   } else if (s.tool === 'highlighter') {
     ctx.globalAlpha = s.opacity || 0.35;
     ctx.globalCompositeOperation = 'multiply';
     ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
   } else if (s.tool === 'pencil') {
     ctx.globalAlpha = 0.85;
     ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
   } else {
     ctx.globalAlpha = 1;
     ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
   }
 
   ctx.lineWidth = s.width * avgScale;
+
+  if (s.points.length === 1) {
+    ctx.beginPath();
+    ctx.arc(
+      s.points[0].x * scaleX,
+      s.points[0].y * scaleY,
+      Math.max(0.5 * avgScale, (s.width * avgScale) / 2),
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
 
   ctx.beginPath();
   ctx.moveTo(s.points[0].x * scaleX, s.points[0].y * scaleY);

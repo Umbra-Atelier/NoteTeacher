@@ -22,6 +22,7 @@ interface OnScreenKeyboardProps {
   onKeyAction: (action: VirtualKeyAction) => void;
   onClose: () => void;
   onSwitchToDictate?: () => void;
+  headerTitle?: string;
 }
 
 const NUMBER_ROW = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
@@ -37,6 +38,7 @@ export const OnScreenKeyboard: React.FC<OnScreenKeyboardProps> = ({
   onKeyAction,
   onClose,
   onSwitchToDictate,
+  headerTitle,
 }) => {
   const [shiftMode, setShiftMode] = useState<'off' | 'once' | 'caps'>('off');
   const [symbolPage, setSymbolPage] = useState<boolean>(false);
@@ -120,7 +122,7 @@ export const OnScreenKeyboard: React.FC<OnScreenKeyboardProps> = ({
         <div className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 min-w-0">
           <Keyboard className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
           <span className="font-semibold text-slate-800 dark:text-slate-100 whitespace-nowrap">
-            On-Screen Keyboard
+            {headerTitle || 'On-Screen Keyboard'}
           </span>
           <span className="hidden sm:inline text-slate-400" aria-hidden="true">
             ·

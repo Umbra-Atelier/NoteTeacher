@@ -155,7 +155,27 @@ export default function App() {
 
   const [strokeWidth, setStrokeWidth] = useState<number>(3);
   const [currentColor, setCurrentColor] = useState<string>('#0F172A');
+  const [geometricColor, setGeometricColor] = useState<string>('#2563EB');
   const [recentColors, setRecentColors] = useState<string[]>(CLASSROOM_PRESET_COLORS);
+
+  const penTypeRef = useRef(penType);
+  penTypeRef.current = penType;
+  const penProfilesRef = useRef(penProfiles);
+  penProfilesRef.current = penProfiles;
+  const geometricColorRef = useRef(geometricColor);
+  geometricColorRef.current = geometricColor;
+
+  const syncColorForMode = useCallback((targetMode: AppMode) => {
+    if (targetMode === 'drawing') {
+      const profile = penProfilesRef.current[penTypeRef.current];
+      if (profile) {
+        setStrokeWidth(profile.width);
+        setCurrentColor(profile.color);
+      }
+    } else if (targetMode === 'geometric') {
+      setCurrentColor(geometricColorRef.current);
+    }
+  }, []);
 
   // Switch pen and restore its individual size and color
   const handleSetPenType = (newType: PenType) => {
@@ -182,6 +202,8 @@ export default function App() {
         ...prev,
         [penType]: { ...prev[penType], color: c },
       }));
+    } else if (mode === 'geometric') {
+      setGeometricColor(c);
     }
   };
 
@@ -412,6 +434,7 @@ export default function App() {
   const handleSetMode = useCallback(
     (nextMode: AppMode) => {
       setEditingDictateBoxId(null);
+      setEditingGridDims(null);
       if (nextMode !== 'dictate' && activeDictateBoxIdRef.current) {
         stopDictation();
         const curId = activeDictateBoxIdRef.current;
@@ -427,9 +450,10 @@ export default function App() {
       ) {
         void requestMicPermission({ silentIfUnsupported: true });
       }
+      syncColorForMode(nextMode);
       setMode(nextMode);
     },
-    [stopDictation, micPermission, requestMicPermission]
+    [stopDictation, micPermission, requestMicPermission, syncColorForMode]
   );
 
   const handleSetDictateEraserActive = useCallback(
@@ -651,25 +675,30 @@ export default function App() {
     isModeBarCollapsed: boolean;
   } | null>(null);
 
-  const applyTutorialStepMode = useCallback((idx: number) => {
-    const step = TUTORIAL_STEPS[idx];
-    if (!step) return;
-    if (step.id === 'mode-bar-collapse') {
-      setIsModeBarCollapsed(false);
-    }
-    if (step.switchMode) {
-      setIsGeometricEraserActive(false);
-      setIsDictateEraserActive(false);
-      setMode(step.switchMode);
-    }
-    if (step.shapeType) {
-      setShapeType(step.shapeType);
-    }
-  }, []);
+  const applyTutorialStepMode = useCallback(
+    (idx: number) => {
+      const step = TUTORIAL_STEPS[idx];
+      if (!step) return;
+      if (step.id === 'mode-bar-collapse') {
+        setIsModeBarCollapsed(false);
+      }
+      if (step.switchMode) {
+        setIsGeometricEraserActive(false);
+        setIsDictateEraserActive(false);
+        syncColorForMode(step.switchMode);
+        setMode(step.switchMode);
+      }
+      if (step.shapeType) {
+        setShapeType(step.shapeType);
+      }
+    },
+    [syncColorForMode]
+  );
 
   const restorePreTutorialState = useCallback(() => {
     const saved = preTutorialRestoreRef.current;
     if (saved) {
+      syncColorForMode(saved.mode);
       setMode(saved.mode);
       setShapeType(saved.shapeType);
       setIsGeometricEraserActive(saved.isGeometricEraserActive);
@@ -677,7 +706,7 @@ export default function App() {
       setIsModeBarCollapsed(saved.isModeBarCollapsed);
       preTutorialRestoreRef.current = null;
     }
-  }, []);
+  }, [syncColorForMode]);
 
   const handleStartTutorial = useCallback(() => {
     preTutorialRestoreRef.current = {
@@ -2701,8 +2730,123 @@ export default function App() {
     }
   }, [syncBaseTextIfIdle]);
 
+  const [editingGridDims, setEditingGridDims] = useState<{
+    shapeId: string;
+    field: 'cols' | 'rows';
+    draft: string;
+    replaceOnFirstKey: boolean;
+  } | null>(null);
+  const editingGridDimsRef = useRef(editingGridDims);
+  editingGridDimsRef.current = editingGridDims;
+  const gridEditSnapshotTakenRef = useRef<string | null>(null);
+
+  const applyGridDimDraft = useCallback(
+    (shapeId: string, field: 'cols' | 'rows', draft: string) => {
+      const clean = draft.replace(/[^0-9]/g, '').slice(0, 3);
+      const parsed = parseInt(clean, 10);
+      if (!Number.isNaN(parsed) && parsed >= 1) {
+        const clamped = Math.max(1, Math.min(100, parsed));
+        if (gridEditSnapshotTakenRef.current !== shapeId) {
+          saveSnapshot();
+          gridEditSnapshotTakenRef.current = shapeId;
+        }
+        setShapes((prev) =>
+          prev.map((sh) => {
+            if (sh.id !== shapeId) return sh;
+            const curCols = sh.gridCols || Math.max(2, Math.round(Math.abs(sh.width) / 28));
+            const curRows = sh.gridRows || Math.max(2, Math.round(Math.abs(sh.height) / 28));
+            return {
+              ...sh,
+              gridCols: field === 'cols' ? clamped : curCols,
+              gridRows: field === 'rows' ? clamped : curRows,
+            };
+          })
+        );
+      }
+    },
+    [saveSnapshot]
+  );
+
+  const handleStartEditGridDims = useCallback((shapeId: string, field: 'cols' | 'rows') => {
+    setEditingDictateBoxId(null);
+    const targetShape = shapesRef.current.find((sh) => sh.id === shapeId);
+    if (!targetShape) return;
+    const cols =
+      targetShape.gridCols || Math.max(2, Math.round(Math.abs(targetShape.width) / 28));
+    const rows =
+      targetShape.gridRows || Math.max(2, Math.round(Math.abs(targetShape.height) / 28));
+    setEditingGridDims({
+      shapeId,
+      field,
+      draft: String(field === 'cols' ? cols : rows),
+      replaceOnFirstKey: true,
+    });
+  }, []);
+
+  const handleChangeGridDimsDraft = useCallback(
+    (shapeId: string, field: 'cols' | 'rows', draft: string) => {
+      const clean = draft.replace(/[^0-9]/g, '').slice(0, 3);
+      setEditingGridDims({
+        shapeId,
+        field,
+        draft: clean,
+        replaceOnFirstKey: false,
+      });
+      applyGridDimDraft(shapeId, field, clean);
+    },
+    [applyGridDimDraft]
+  );
+
+  const handleStopEditGridDims = useCallback(() => {
+    gridEditSnapshotTakenRef.current = null;
+    setEditingGridDims(null);
+  }, []);
+
   const handleVirtualKeyAction = useCallback(
     (action: VirtualKeyAction) => {
+      const gridEdit = editingGridDimsRef.current;
+      if (gridEdit) {
+        if (action.type === 'char') {
+          if (/^[0-9]$/.test(action.value)) {
+            const nextRaw = gridEdit.replaceOnFirstKey
+              ? action.value
+              : (gridEdit.draft + action.value).slice(0, 3);
+            setEditingGridDims({
+              shapeId: gridEdit.shapeId,
+              field: gridEdit.field,
+              draft: nextRaw,
+              replaceOnFirstKey: false,
+            });
+            applyGridDimDraft(gridEdit.shapeId, gridEdit.field, nextRaw);
+          }
+          return;
+        }
+        if (action.type === 'backspace') {
+          const nextRaw = gridEdit.replaceOnFirstKey ? '' : gridEdit.draft.slice(0, -1);
+          setEditingGridDims({
+            shapeId: gridEdit.shapeId,
+            field: gridEdit.field,
+            draft: nextRaw,
+            replaceOnFirstKey: false,
+          });
+          applyGridDimDraft(gridEdit.shapeId, gridEdit.field, nextRaw);
+          return;
+        }
+        if (action.type === 'move_cursor') {
+          const nextField: 'cols' | 'rows' = action.delta > 0 ? 'rows' : 'cols';
+          handleStartEditGridDims(gridEdit.shapeId, nextField);
+          return;
+        }
+        if (action.type === 'enter') {
+          if (gridEdit.field === 'cols') {
+            handleStartEditGridDims(gridEdit.shapeId, 'rows');
+          } else {
+            handleStopEditGridDims();
+          }
+        }
+        return;
+      }
+
       const boxId = editingDictateBoxIdRef.current;
       if (!boxId) return;
       const target = dictatedTextBoxesRef.current.find((b) => b.id === boxId);
@@ -2764,8 +2908,40 @@ export default function App() {
         }
       });
     },
-    [syncBaseTextIfIdle]
+    [applyGridDimDraft, handleStartEditGridDims, handleStopEditGridDims, syncBaseTextIfIdle]
   );
+
+  // Support physical keyboard typing directly while grid dimensions keypad is open
+  useEffect(() => {
+    if (!editingGridDims) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+        return;
+      }
+      if (/^[0-9]$/.test(e.key)) {
+        e.preventDefault();
+        handleVirtualKeyAction({ type: 'char', value: e.key });
+      } else if (e.key === 'Backspace') {
+        e.preventDefault();
+        handleVirtualKeyAction({ type: 'backspace' });
+      } else if (e.key === 'Tab' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleVirtualKeyAction({ type: 'move_cursor', delta: 1 });
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handleVirtualKeyAction({ type: 'move_cursor', delta: -1 });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        handleVirtualKeyAction({ type: 'enter' });
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        handleStopEditGridDims();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [editingGridDims, handleVirtualKeyAction, handleStopEditGridDims]);
 
   const handleClickOutsideDictateBox = useCallback(() => {
     setEditingDictateBoxId(null);
@@ -4017,6 +4193,18 @@ export default function App() {
                 selectedDictateBoxId={selectedDictateBoxId}
                 editingDictateBoxId={editingDictateBoxId}
                 isDictating={isDictating}
+                editingGridDims={
+                  editingGridDims
+                    ? {
+                        shapeId: editingGridDims.shapeId,
+                        field: editingGridDims.field,
+                        draft: editingGridDims.draft,
+                      }
+                    : null
+                }
+                onStartEditGridDims={handleStartEditGridDims}
+                onChangeGridDimsDraft={handleChangeGridDimsDraft}
+                onStopEditGridDims={handleStopEditGridDims}
                 onAddDictatedTextBox={handleAddDictatedTextBox}
                 onUpdateDictatedTextBox={handleUpdateDictatedTextBox}
                 onDeleteDictatedTextBox={handleDeleteDictatedTextBox}
@@ -4295,18 +4483,30 @@ export default function App() {
         </div>
       )}
 
-      {/* 5.5 BOTTOM ON-SCREEN KEYBOARD FOR DOUBLE-CLICKED TEXT BOXES */}
-      {!isViewerTab && editingDictateBoxId !== null && (
+      {/* 5.5 BOTTOM ON-SCREEN KEYBOARD FOR TEXT BOXES & GRID DIMENSIONS */}
+      {!isViewerTab && (editingDictateBoxId !== null || editingGridDims !== null) && (
         <OnScreenKeyboard
+          headerTitle={
+            editingGridDims
+              ? `Grid ${editingGridDims.field === 'cols' ? 'Columns (X)' : 'Rows (Y)'} · On-Screen Keypad`
+              : undefined
+          }
           onKeyAction={handleVirtualKeyAction}
-          onSwitchToDictate={() => {
-            const boxId = editingDictateBoxId;
-            setEditingDictateBoxId(null);
-            if (boxId) {
-              handleResumeDictateBox(boxId);
-            }
+          onSwitchToDictate={
+            editingDictateBoxId !== null
+              ? () => {
+                  const boxId = editingDictateBoxId;
+                  setEditingDictateBoxId(null);
+                  if (boxId) {
+                    handleResumeDictateBox(boxId);
+                  }
+                }
+              : undefined
+          }
+          onClose={() => {
+            if (editingGridDims) handleStopEditGridDims();
+            if (editingDictateBoxId) handleStopManualEditDictateBox();
           }}
-          onClose={handleStopManualEditDictateBox}
         />
       )}
 
@@ -4314,7 +4514,7 @@ export default function App() {
       {appStatusNotice && (
         <div
           className={`fixed ${
-            editingDictateBoxId !== null
+            editingDictateBoxId !== null || editingGridDims !== null
               ? 'top-20'
               : isBottomMicVisible
               ? 'bottom-24'

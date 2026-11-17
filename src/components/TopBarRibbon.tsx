@@ -2538,22 +2538,34 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   </>
                 )}
 
-                <div className="flex items-center gap-1 pl-2 border-l border-slate-200 dark:border-slate-800">
-                  <span className="text-slate-500 font-medium">Width:</span>
-                  {[2, 4, 6].map((w) => (
-                    <button
-                      key={w}
-                      type="button"
-                      onClick={() => onSetShapeStrokeWidth(w)}
-                      className={`px-2 py-0.5 rounded text-xs font-mono font-medium ${
-                        shapeStrokeWidth === w
-                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                          : 'text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'
-                      }`}
-                    >
-                      {w}px
-                    </button>
-                  ))}
+                <div className="flex items-center gap-2 pl-2 border-l border-slate-200 dark:border-slate-800">
+                  <span className="text-slate-500 font-medium">Size:</span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={24}
+                    step={1}
+                    value={shapeStrokeWidth}
+                    onChange={(e) => onSetShapeStrokeWidth(parseInt(e.target.value, 10))}
+                    aria-label="Geometric line size"
+                    data-testid="geometric-size-slider"
+                    className="w-24 accent-amber-600 cursor-pointer"
+                  />
+                  <span
+                    data-testid="geometric-size-value"
+                    className="font-mono text-[11px] text-slate-500 w-7 tabular-nums"
+                  >
+                    {shapeStrokeWidth}px
+                  </span>
+                  <div className="w-6 h-5 flex items-center justify-center shrink-0">
+                    <div
+                      className="w-full rounded-full"
+                      style={{
+                        height: `${Math.min(18, Math.max(1, shapeStrokeWidth))}px`,
+                        backgroundColor: currentColor,
+                      }}
+                    />
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-1 pl-2 border-l border-slate-200 dark:border-slate-800">

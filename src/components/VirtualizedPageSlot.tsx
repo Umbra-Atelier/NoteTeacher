@@ -73,6 +73,7 @@ interface VirtualizedPageSlotProps {
   selectedDictateBoxId?: string | null;
   editingDictateBoxId?: string | null;
   isDictating?: boolean;
+  editingGridDims?: { shapeId: string; field: 'cols' | 'rows'; draft: string } | null;
 
   // Document or pre-grouped per-page element collections
   strokes: CanvasStroke[];
@@ -104,6 +105,9 @@ interface VirtualizedPageSlotProps {
   onStopManualEditDictateBox?: () => void;
   onClickOutsideDictateBox?: () => void;
   onDeselectDictateBox?: () => void;
+  onStartEditGridDims?: (shapeId: string, field: 'cols' | 'rows') => void;
+  onChangeGridDimsDraft?: (shapeId: string, field: 'cols' | 'rows', draft: string) => void;
+  onStopEditGridDims?: () => void;
   onAddStroke: (stroke: CanvasStroke) => void;
   onAddShape: (shape: GeometricShape) => void;
   onUpdateShape: (id: string, updated: Partial<GeometricShape>) => void;
@@ -198,6 +202,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   selectedDictateBoxId = null,
   editingDictateBoxId = null,
   isDictating = false,
+  editingGridDims = null,
   strokes,
   shapes,
   graphs,
@@ -218,6 +223,9 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   onStopManualEditDictateBox,
   onClickOutsideDictateBox,
   onDeselectDictateBox,
+  onStartEditGridDims,
+  onChangeGridDimsDraft,
+  onStopEditGridDims,
   onAddStroke,
   onAddShape,
   onUpdateShape,
@@ -585,6 +593,10 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
             selectedDictateBoxId={selectedDictateBoxId}
             editingDictateBoxId={editingDictateBoxId}
             isDictating={isDictating}
+            editingGridDims={editingGridDims}
+            onStartEditGridDims={onStartEditGridDims}
+            onChangeGridDimsDraft={onChangeGridDimsDraft}
+            onStopEditGridDims={onStopEditGridDims}
             onAddDictatedTextBox={onAddDictatedTextBox}
             onUpdateDictatedTextBox={onUpdateDictatedTextBox}
             onDeleteDictatedTextBox={onDeleteDictatedTextBox}

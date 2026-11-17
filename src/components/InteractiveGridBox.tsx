@@ -10,6 +10,11 @@ interface InteractiveGridBoxProps {
   allowFingerControls?: boolean;
   isReadOnly?: boolean;
   hideChrome?: boolean;
+  editingDimsField?: 'cols' | 'rows' | null;
+  editingDimsDraft?: string;
+  onStartEditDims?: (field: 'cols' | 'rows') => void;
+  onChangeDimsDraft?: (field: 'cols' | 'rows', draft: string) => void;
+  onStopEditDims?: () => void;
   onSelect: () => void;
   onUpdate: (updated: Partial<GeometricShape>) => void;
   onDelete: () => void;
@@ -22,6 +27,11 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
   allowFingerControls = true,
   isReadOnly = false,
   hideChrome = false,
+  editingDimsField = null,
+  editingDimsDraft = '',
+  onStartEditDims,
+  onChangeDimsDraft,
+  onStopEditDims,
   onSelect,
   onUpdate,
   onDelete,
@@ -222,7 +232,10 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
       {/* ============================================================== */}
       {/* SVG FULL GRAPHING GRID CONTENT                                 */}
       {/* ============================================================== */}
-      <svg className="w-full h-full overflow-visible pointer-events-none">
+      <svg
+        shapeRendering="geometricPrecision"
+        className="w-full h-full overflow-visible pointer-events-none"
+      >
         {/* Outer Grid Border */}
         <rect
           x={0}
@@ -231,6 +244,8 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
           height={h}
           stroke={strokeColor}
           strokeWidth={shape.strokeWidth || 1.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
           fill="none"
           strokeDasharray={strokeDash}
         />
@@ -239,6 +254,7 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
         {Array.from({ length: cols - 1 }).map((_, i) => {
           const lx = ((i + 1) / cols) * w;
           const isCenter = Math.abs(i + 1 - cols / 2) < 0.5;
+          const baseW = shape.strokeWidth || 1.5;
           return (
             <line
               key={`grid-v-${i}`}
@@ -247,8 +263,9 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
               x2={lx}
               y2={h}
               stroke={strokeColor}
-              strokeWidth={(shape.strokeWidth || 1.5) * (isCenter ? 1.2 : 0.75)}
+              strokeWidth={isCenter ? baseW * 1.2 : Math.max(0.85, baseW * 0.85)}
               strokeOpacity={isCenter ? 0.9 : 0.65}
+              strokeLinecap="round"
               strokeDasharray={isCenter ? undefined : strokeDash}
             />
           );
@@ -258,6 +275,7 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
         {Array.from({ length: rows - 1 }).map((_, j) => {
           const ly = ((j + 1) / rows) * h;
           const isCenter = Math.abs(j + 1 - rows / 2) < 0.5;
+          const baseW = shape.strokeWidth || 1.5;
           return (
             <line
               key={`grid-h-${j}`}
@@ -266,8 +284,9 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
               x2={w}
               y2={ly}
               stroke={strokeColor}
-              strokeWidth={(shape.strokeWidth || 1.5) * (isCenter ? 1.2 : 0.75)}
+              strokeWidth={isCenter ? baseW * 1.2 : Math.max(0.85, baseW * 0.85)}
               strokeOpacity={isCenter ? 0.9 : 0.65}
+              strokeLinecap="round"
               strokeDasharray={isCenter ? undefined : strokeDash}
             />
           );
@@ -327,11 +346,118 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
                 </span>
               </div>
 
-              <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-mono font-semibold text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
-                <Grid className="w-3 h-3 text-indigo-500" />
-                <span>
-                  {cols}×{rows} lines
-                </span>
+              <div
+                data-testid="grid-dims-control"
+                onPointerDown={(e) => {
+                  lastPointerTypeRef.current = e.pointerType;
+                  if (e.pointerType === 'touch' && !allowFingerControls) return;
+                  e.stopPropagation();
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-mono font-semibold text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700"
+              >
+                <Grid className="w-3 h-3 text-indigo-500 shrink-0" />
+                {editingDimsField !== null ? (
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      data-testid="grid-cols-edit-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onStartEditDims?.('cols');
+                      }}
+                      title="Edit columns with on-screen keyboard"
+                      className={`px-1.5 py-0.5 rounded border text-[11px] font-mono font-bold transition-colors cursor-pointer ${
+                        editingDimsField === 'cols'
+                          ? 'bg-indigo-600 text-white border-indigo-500 shadow-xs'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-600 hover:border-indigo-400'
+                      }`}
+                    >
+                      {editingDimsField === 'cols' ? editingDimsDraft || '—' : cols}
+                    </button>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      aria-label="Grid columns"
+                      data-testid="grid-cols-input"
+                      value={editingDimsField === 'cols' ? editingDimsDraft : String(cols)}
+                      onFocus={() => {
+                        if (editingDimsField !== 'cols') onStartEditDims?.('cols');
+                      }}
+                      onChange={(e) => {
+                        const clean = e.target.value.replace(/[^0-9]/g, '').slice(0, 3);
+                        onChangeDimsDraft?.('cols', clean);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Tab' || e.key === 'ArrowRight') {
+                          e.preventDefault();
+                          onStartEditDims?.('rows');
+                        } else if (e.key === 'Enter' || e.key === 'Escape') {
+                          e.preventDefault();
+                          onStopEditDims?.();
+                        }
+                      }}
+                      className="sr-only"
+                    />
+                    <span className="text-slate-400">×</span>
+                    <button
+                      type="button"
+                      data-testid="grid-rows-edit-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onStartEditDims?.('rows');
+                      }}
+                      title="Edit rows with on-screen keyboard"
+                      className={`px-1.5 py-0.5 rounded border text-[11px] font-mono font-bold transition-colors cursor-pointer ${
+                        editingDimsField === 'rows'
+                          ? 'bg-indigo-600 text-white border-indigo-500 shadow-xs'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-600 hover:border-indigo-400'
+                      }`}
+                    >
+                      {editingDimsField === 'rows' ? editingDimsDraft || '—' : rows}
+                    </button>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      aria-label="Grid rows"
+                      data-testid="grid-rows-input"
+                      value={editingDimsField === 'rows' ? editingDimsDraft : String(rows)}
+                      onFocus={() => {
+                        if (editingDimsField !== 'rows') onStartEditDims?.('rows');
+                      }}
+                      onChange={(e) => {
+                        const clean = e.target.value.replace(/[^0-9]/g, '').slice(0, 3);
+                        onChangeDimsDraft?.('rows', clean);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'ArrowLeft') {
+                          e.preventDefault();
+                          onStartEditDims?.('cols');
+                        } else if (e.key === 'Enter' || e.key === 'Escape') {
+                          e.preventDefault();
+                          onStopEditDims?.();
+                        }
+                      }}
+                      className="sr-only"
+                    />
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400">lines</span>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    data-testid="grid-dims-trigger"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onStartEditDims?.('cols');
+                    }}
+                    title="Click to edit columns × rows with the on-screen keyboard"
+                    className="flex items-center gap-0.5 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer"
+                  >
+                    <span>
+                      {cols}×{rows} lines
+                    </span>
+                  </button>
+                )}
               </div>
 
               <button
