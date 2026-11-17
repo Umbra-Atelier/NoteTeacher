@@ -169,6 +169,11 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
     setIsDragging(true);
   };
 
+  const onUpdateRef = useRef(onUpdate);
+  onUpdateRef.current = onUpdate;
+  const boxScaleRef = useRef(box.scale || 1);
+  boxScaleRef.current = box.scale || 1;
+
   useEffect(() => {
     if (!isDragging) return;
 
@@ -180,7 +185,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       const scale = zoomScale || 1;
       const dx = (latestX - dragStart.x) / scale;
       const dy = (latestY - dragStart.y) / scale;
-      onUpdate({
+      onUpdateRef.current({
         x: Math.max(0, dragStart.boxX + dx),
         y: Math.max(0, dragStart.boxY + dy),
       });
@@ -214,7 +219,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       window.removeEventListener('pointerup', handleUp);
       window.removeEventListener('pointercancel', handleUp);
     };
-  }, [isDragging, dragStart, onUpdate, zoomScale]);
+  }, [isDragging, dragStart, zoomScale]);
 
   // Two-finger Pinch to scale preserving proportions
   useEffect(() => {
@@ -230,7 +235,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
           e.touches[0].clientY - e.touches[1].clientY
         );
         pinchStartDistRef.current = dist;
-        pinchStartScaleRef.current = box.scale || 1;
+        pinchStartScaleRef.current = boxScaleRef.current || 1;
       }
     };
 
@@ -244,7 +249,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
         );
         const factor = dist / pinchStartDistRef.current;
         const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, pinchStartScaleRef.current * factor));
-        onUpdate({ scale: newScale });
+        onUpdateRef.current({ scale: newScale });
       }
     };
 
@@ -261,7 +266,7 @@ export const ScientificCalculatorBox: React.FC<ScientificCalculatorBoxProps> = (
       el.removeEventListener('touchmove', handleTouchMove);
       el.removeEventListener('touchend', handleTouchEnd);
     };
-  }, [box.scale, onUpdate, disableTwoFingerPinch, allowFingerControls]);
+  }, [disableTwoFingerPinch, allowFingerControls]);
 
   // Top-Right L-Grab Drag
   const startResizeTR = (startX: number, startY: number) => {

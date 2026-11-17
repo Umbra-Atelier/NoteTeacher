@@ -803,11 +803,13 @@ export default function App() {
       );
       if (touchInputMode === 'two_finger_stylus') {
         if (stylusConfig.detectionMode === 'smart_tip') {
-          const maxR = (stylusConfig.maxTipSizePx ?? 14) / 2;
+          const maxTip = stylusConfig.maxTipSizePx ?? 14;
           return list.filter((t) => {
             const rx = t.radiusX || 0;
             const ry = t.radiusY || 0;
-            return !(rx > 0 && ry > 0 && Math.max(rx, ry) <= maxR);
+            const maxR = Math.max(rx, ry);
+            // Ignore placeholder <= 1.5px radii when identifying fingers vs passive tip
+            return !(maxR > 1.5 && maxR * 2 <= maxTip);
           });
         }
       }
@@ -4193,15 +4195,7 @@ export default function App() {
                 selectedDictateBoxId={selectedDictateBoxId}
                 editingDictateBoxId={editingDictateBoxId}
                 isDictating={isDictating}
-                editingGridDims={
-                  editingGridDims
-                    ? {
-                        shapeId: editingGridDims.shapeId,
-                        field: editingGridDims.field,
-                        draft: editingGridDims.draft,
-                      }
-                    : null
-                }
+                editingGridDims={editingGridDims}
                 onStartEditGridDims={handleStartEditGridDims}
                 onChangeGridDimsDraft={handleChangeGridDimsDraft}
                 onStopEditGridDims={handleStopEditGridDims}
@@ -4252,7 +4246,12 @@ export default function App() {
           title={isFullPovMode ? 'Exit Full POV View' : 'Expand to Full POV View'}
           style={
             isFullPovMode
-              ? { left: touchInputMode === 'stylus_and_hand' ? '64px' : '8px' }
+              ? {
+                  left:
+                    touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only'
+                      ? '64px'
+                      : '8px',
+                }
               : { left: `${Math.max(8, pageLeftPx - 44)}px` }
           }
           className="absolute top-1/2 -translate-y-1/2 z-40 w-9 h-9 rounded-full bg-white/90 dark:bg-slate-800/90 hover:bg-blue-600 hover:text-white text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-700 shadow-lg flex items-center justify-center transition-colors cursor-pointer"

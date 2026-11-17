@@ -33,14 +33,13 @@ export const MoveFileModal: React.FC<MoveFileModalProps> = ({
   );
 
   useEffect(() => {
-    if (isOpen) {
-      if (destinationTabs.length === 0) {
-        setSelectedTargetTabId('');
-      } else if (!destinationTabs.some((t) => t.id === selectedTargetTabId)) {
-        setSelectedTargetTabId(destinationTabs[0].id);
-      }
-    }
-  }, [isOpen, destinationTabs, selectedTargetTabId]);
+    if (!isOpen) return;
+    setSelectedTargetTabId((prev) => {
+      if (destinationTabs.length === 0) return '';
+      if (prev && destinationTabs.some((t) => t.id === prev)) return prev;
+      return destinationTabs[0].id;
+    });
+  }, [isOpen, destinationTabs]);
 
   if (!isOpen || !file || typeof document === 'undefined') return null;
 

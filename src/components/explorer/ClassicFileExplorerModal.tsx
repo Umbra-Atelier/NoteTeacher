@@ -323,8 +323,24 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
     }
   };
 
+  const wasModalOpenRef = React.useRef(false);
+  const folderTabsRef = React.useRef(folderTabs);
+  folderTabsRef.current = folderTabs;
+  const filesByNodeRef = React.useRef(filesByNode);
+  filesByNodeRef.current = filesByNode;
+  const nodeByIdRef = React.useRef(nodeById);
+  nodeByIdRef.current = nodeById;
+
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      wasModalOpenRef.current = false;
+      return;
+    }
+    const isFreshOpen = !wasModalOpenRef.current;
+    wasModalOpenRef.current = true;
+    if (!isFreshOpen) return;
+
+    const tabs = folderTabsRef.current;
     setIsSavePanelExpanded(modalMode === 'save');
     setSelectedSaveMode(initialSaveMode);
     setSaveFileName(
@@ -335,27 +351,27 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
     );
     setIsSavingCopy(false);
     const preferred =
-      activeTabId && activeTabId !== 'home' && folderTabs.some((t) => t.id === activeTabId)
+      activeTabId && activeTabId !== 'home' && tabs.some((t) => t.id === activeTabId)
         ? activeTabId
-        : folderTabs[0]?.id || '';
+        : tabs[0]?.id || '';
     setSelectedNodeId((prev) => {
-      if (activeTabId && activeTabId !== 'home' && folderTabs.some((t) => t.id === activeTabId)) {
+      if (activeTabId && activeTabId !== 'home' && tabs.some((t) => t.id === activeTabId)) {
         return activeTabId;
       }
-      if (prev && (folderTabs.some((t) => t.id === prev) || nodeById[prev])) return prev;
+      if (prev && (tabs.some((t) => t.id === prev) || nodeByIdRef.current[prev])) return prev;
       return preferred;
     });
     setSelectedFileId(null);
     setLoadError(null);
-    folderTabs.forEach((tab) => {
-      if (tab.accessState === 'granted' && !filesByNode[tab.id]) {
+    tabs.forEach((tab) => {
+      if (tab.accessState === 'granted' && !filesByNodeRef.current[tab.id]) {
         void loadChildrenForTab(tab);
       }
     });
     if (preferred) {
-      setExpandedNodes((prev) => ({ ...prev, [preferred]: true }));
+      setExpandedNodes((prev) => (prev[preferred] ? prev : { ...prev, [preferred]: true }));
     }
-  }, [isOpen, activeTabId, folderTabs, modalMode, initialSaveMode, suggestedSaveName]);
+  }, [isOpen, activeTabId, modalMode, initialSaveMode, suggestedSaveName]);
 
   const currentTab = folderTabs.find((t) => t.id === selectedNodeId);
   const currentSubfolder = nodeById[selectedNodeId];

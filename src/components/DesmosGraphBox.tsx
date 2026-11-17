@@ -504,7 +504,7 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       const scale = zoomScale || 1;
       const dx = (latestX - dragStart.x) / scale;
       const dy = (latestY - dragStart.y) / scale;
-      onUpdate({
+      onUpdateRef.current({
         x: Math.max(0, dragStart.boxX + dx),
         y: Math.max(0, dragStart.boxY + dy),
       });
@@ -538,7 +538,7 @@ export const DesmosGraphBox: React.FC<DesmosGraphBoxProps> = ({
       window.removeEventListener('pointerup', handleEnd);
       window.removeEventListener('pointercancel', handleEnd);
     };
-  }, [isDragging, dragStart, onUpdate, zoomScale]);
+  }, [isDragging, dragStart, zoomScale]);
 
   // Proportional L-Grab Resizing via Top-Right corner (strictly locks drawn aspect ratio, no min 340 block)
   const startResizeTR = (startX: number, startY: number) => {

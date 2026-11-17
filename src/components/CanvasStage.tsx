@@ -38,6 +38,13 @@ import { sanitizeClonedDocumentForHtml2Canvas } from '../utils/domSnapshot';
 import { recordPageStageSize } from '../utils/widgetSnapshotCache';
 import { hexWithAlphaPercent } from '../utils/colorUtils';
 import {
+  ensureTouchGeometryTracker,
+  recordTouchGeometry,
+  clearPointerGeometryCache,
+  getEffectiveTouchMetrics,
+  getTouchContactDiameters,
+} from '../utils/touchGeometry';
+import {
   acquirePdfPageTile,
   releasePdfTile,
   releasePagePdfResources,
@@ -760,6 +767,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const handledByNativeInkRef = useRef<WeakSet<Event>>(new WeakSet());
   const activeRecoveryWindowPointerIdRef = useRef<number | null>(null);
   const activeSmartStylusPointerIdRef = useRef<number | null>(null);
+  const rejectedSmartTouchIdsRef = useRef<Set<number>>(new Set());
+  const smartTouchCoordsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const activePointerIdRef = useRef<number | null>(null);
   const isDrawingRef = useRef<boolean>(false);
   const currentPointsRef = useRef<StrokePoint[]>([]);
@@ -959,7 +968,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     ghostedStrokes.length + ghostedShapes.length + ghostedDictatedBoxes.length;
 
   const isNavToolOverride =
-    touchInputMode === 'stylus_and_hand' && leftToolbarTool !== 'pointer';
+    (touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') &&
+    leftToolbarTool !== 'pointer';
   const isAnyEraseActive =
     !isAudienceViewer &&
     !isNavToolOverride &&
@@ -1182,7 +1192,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   };
 
   // Global pen contact tracking & safety reset if a pointer lifts or cancels outside the canvas layer
+  // Ensure touch radius tracking and global hardware pen/touch reset stay active
   useEffect(() => {
+    ensureTouchGeometryTracker();
     const trackPenDown = (ev: PointerEvent) => {
       if (ev.pointerType === 'pen') {
         confirmedDownPenIdsRef.current.add(ev.pointerId);
@@ -1203,6 +1215,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
         activeSmartStylusPointerIdRef.current = null;
       }
+      rejectedSmartTouchIdsRef.current.delete(ev.pointerId);
+      smartTouchCoordsRef.current.delete(ev.pointerId);
+      clearPointerGeometryCache(ev.pointerId);
       if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
         isStylusDownRef.current = false;
       }
@@ -1454,72 +1469,26 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     []
   );
 
-  // Two-Finger Pinch & Stretch to Zoom: Centers zooming exactly on finger midpoint
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container || isAudienceViewer) return;
-
-    const getActiveFingerTouches = (touches: TouchList): Touch[] => {
-      const list = Array.from(touches);
-      // Always exclude explicit hardware stylus contacts so resting palm + active pen never reads as 2 fingers
-      const nonStylusList = list.filter(
-        (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
-      );
-      if (touchInputMode === 'two_finger_stylus') {
-        if (nonStylusList.length < list.length) {
-          return nonStylusList;
+  // Helper to cleanly cancel a provisional Smart Tip stroke when real finger size (> maxTip) or 2-finger pinch arrives
+  const abortActiveSmartTipTouch = useCallback(
+    (pointerId?: number) => {
+      const targetId = pointerId ?? activeSmartStylusPointerIdRef.current;
+      if (targetId !== null && targetId !== undefined) {
+        rejectedSmartTouchIdsRef.current.add(targetId);
+        smartTouchCoordsRef.current.delete(targetId);
+        const layer = interactionLayerRef.current;
+        if (layer) {
+          tryReleasePointerCapture(layer, targetId);
         }
-        if (stylusConfig.detectionMode === 'smart_tip') {
-          const maxR = (stylusConfig.maxTipSizePx ?? 14) / 2;
-          return nonStylusList.filter((t) => {
-            const rx = t.radiusX || 0;
-            const ry = t.radiusY || 0;
-            if (rx > 0 && ry > 0 && Math.max(rx, ry) <= maxR) {
-              return false;
-            }
-            return true;
-          });
-        }
-        const hasTouchTypeApi = list.some(
-          (t) => typeof (t as Touch & { touchType?: string }).touchType === 'string'
-        );
-        if (hasTouchTypeApi) {
-          return nonStylusList;
-        }
-        return isStylusDownRef.current || contactingPenIdsRef.current.size > 0 ? [] : nonStylusList;
       }
-      return nonStylusList;
-    };
-
-    const handleTouchStart = (e: TouchEvent) => {
-      // Let Desmos boxes and Scientific Calculators handle their own internal pinch/touch gestures
-      if ((e.target as HTMLElement)?.closest?.('.desmos-box, .calculator-box')) {
-        return;
+      activeSmartStylusPointerIdRef.current = null;
+      if (contactingPenIdsRef.current.size === 0) {
+        isStylusDownRef.current = false;
       }
-
-      // In stylus_only or stylus_and_hand mode, all two-finger canvas touch controls are disabled
-      if (touchInputMode === 'stylus_only' || touchInputMode === 'stylus_and_hand') {
-        return;
-      }
-
-      // Never let resting palm/wrist + pen detection abort or block an active pen stroke
-      if (
-        isStylusDownRef.current ||
-        contactingPenIdsRef.current.size > 0 ||
-        Date.now() - lastStylusEventAtRef.current < 220 ||
-        (isDrawingRef.current && touchInputMode !== 'two_finger')
-      ) {
-        return;
-      }
-
-      const fingerTouches = getActiveFingerTouches(e.touches);
-      if (fingerTouches.length >= 2) {
-        e.preventDefault();
-        isPinchingRef.current = true;
-
+      if (targetId === undefined || activePointerIdRef.current === targetId) {
+        activePointerIdRef.current = null;
         if (isDrawingRef.current) {
           isDrawingRef.current = false;
-          activePointerIdRef.current = null;
           currentPointsRef.current = [];
           stopLiveStrokeStream();
           clearLiveCanvas();
@@ -1538,6 +1507,116 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         setPhotoCropCurrent(null);
         setPhotoCropClientStart(null);
         setPhotoCropClientCurrent(null);
+      }
+    },
+    [clearLiveCanvas, stopLiveStrokeStream]
+  );
+
+  // Two-Finger Pinch & Stretch to Zoom: Centers zooming exactly on finger midpoint
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || isAudienceViewer) return;
+
+    const getActiveFingerTouches = (touches: TouchList): Touch[] => {
+      const list = Array.from(touches);
+      // Always exclude explicit hardware stylus contacts so resting palm + active pen never reads as 2 fingers
+      const nonStylusList = list.filter(
+        (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
+      );
+      if (touchInputMode === 'two_finger_stylus') {
+        if (nonStylusList.length < list.length) {
+          return nonStylusList;
+        }
+        if (stylusConfig.detectionMode === 'smart_tip') {
+          const maxTip = stylusConfig.maxTipSizePx ?? 14;
+          return nonStylusList.filter((t) => {
+            const geom = getTouchContactDiameters(t);
+            // Ignore unmeasured <= 1px placeholder radii so two-finger pinch never filters itself out
+            if (geom.isMeasured && geom.size <= maxTip) {
+              return false;
+            }
+            return true;
+          });
+        }
+        const hasTouchTypeApi = list.some(
+          (t) => typeof (t as Touch & { touchType?: string }).touchType === 'string'
+        );
+        if (hasTouchTypeApi) {
+          return nonStylusList;
+        }
+        return isStylusDownRef.current || contactingPenIdsRef.current.size > 0 ? [] : nonStylusList;
+      }
+      return nonStylusList;
+    };
+
+    const disqualifySmartTipIfTouchTooWide = (e: TouchEvent) => {
+      if (
+        stylusConfig.detectionMode !== 'smart_tip' ||
+        activeSmartStylusPointerIdRef.current === null ||
+        contactingPenIdsRef.current.size > 0
+      ) {
+        return;
+      }
+      const activeId = activeSmartStylusPointerIdRef.current;
+      const storedCoord = smartTouchCoordsRef.current.get(activeId);
+      const maxTip = stylusConfig.maxTipSizePx ?? 14;
+      for (let i = 0; i < e.touches.length; i++) {
+        const t = e.touches[i];
+        if ((t as Touch & { touchType?: string }).touchType === 'stylus') continue;
+        if (
+          storedCoord &&
+          Math.hypot(t.clientX - storedCoord.x, t.clientY - storedCoord.y) > 72
+        ) {
+          continue;
+        }
+        const geom = getTouchContactDiameters(t);
+        const hasPenPressure = geom.force > 0 && Math.abs(geom.force - 0.5) > 0.01;
+        const fits =
+          geom.size <= maxTip || (hasPenPressure && geom.size <= maxTip + 6);
+        if (geom.isMeasured && !fits) {
+          abortActiveSmartTipTouch(activeId);
+          break;
+        }
+      }
+    };
+
+    const handleTouchStart = (e: TouchEvent) => {
+      recordTouchGeometry(e);
+      disqualifySmartTipIfTouchTooWide(e);
+
+      // Let Desmos boxes and Scientific Calculators handle their own internal pinch/touch gestures
+      if ((e.target as HTMLElement)?.closest?.('.desmos-box, .calculator-box')) {
+        return;
+      }
+
+      // In stylus_only or stylus_and_hand mode, all two-finger canvas touch controls are disabled
+      if (touchInputMode === 'stylus_only' || touchInputMode === 'stylus_and_hand') {
+        return;
+      }
+
+      const isHardwarePenActive =
+        contactingPenIdsRef.current.size > 0 || Date.now() - lastStylusEventAtRef.current < 220;
+
+      // Never let resting palm/wrist + hardware pen abort or block an active hardware stylus stroke
+      if (isHardwarePenActive) {
+        return;
+      }
+      if (
+        stylusConfig.detectionMode !== 'smart_tip' &&
+        (isStylusDownRef.current || (isDrawingRef.current && touchInputMode !== 'two_finger'))
+      ) {
+        return;
+      }
+
+      const fingerTouches = getActiveFingerTouches(e.touches);
+      if (fingerTouches.length >= 2) {
+        e.preventDefault();
+        isPinchingRef.current = true;
+
+        // Abort any provisional single-finger or smart-tip touch stroke when 2 fingers initiate pinch/pan
+        if (activeSmartStylusPointerIdRef.current !== null || isDrawingRef.current) {
+          abortActiveSmartTipTouch(activeSmartStylusPointerIdRef.current ?? undefined);
+        }
 
         const t0 = fingerTouches[0];
         const t1 = fingerTouches[1];
@@ -1561,6 +1640,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     };
 
     const handleTouchMove = (e: TouchEvent) => {
+      recordTouchGeometry(e);
+      disqualifySmartTipIfTouchTooWide(e);
+
       if ((e.target as HTMLElement)?.closest?.('.desmos-box, .calculator-box')) {
         return;
       }
@@ -1569,7 +1651,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
-      if (isStylusDownRef.current || isDrawingRef.current) {
+      if (
+        contactingPenIdsRef.current.size > 0 ||
+        ((isStylusDownRef.current || isDrawingRef.current) && !isPinchingRef.current)
+      ) {
         isPinchingRef.current = false;
         pinchInitialDistRef.current = null;
         pinchFocalStageRef.current = null;
@@ -1618,6 +1703,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     };
 
     const handleTouchEnd = (e: TouchEvent) => {
+      recordTouchGeometry(e);
       const fingerTouches = getActiveFingerTouches(e.touches);
       if (fingerTouches.length < 2) {
         isPinchingRef.current = false;
@@ -1661,7 +1747,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       container.removeEventListener('touchcancel', handleTouchEnd);
       container.removeEventListener('wheel', handleWheel);
     };
-  }, [mode, zoomScale, panOffset, touchInputMode, stylusConfig, isAudienceViewer]);
+  }, [mode, zoomScale, panOffset, touchInputMode, stylusConfig, isAudienceViewer, abortActiveSmartTipTouch]);
 
   // Picture Copy: Capture real pixel-exact screenshot of cropped canvas region with robust native 2D composite fallback
   const captureSquareSnippet = async (
@@ -2019,7 +2105,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // Stylus Detection & Palm Rejection Gate (Active Pen vs Smart Tip Passive)
   const isPointerAccepted = useCallback(
     (
-      e: Pick<PointerEvent, 'pointerType' | 'pointerId' | 'width' | 'height' | 'pressure' | 'buttons'>,
+      e: Pick<
+        PointerEvent,
+        'pointerType' | 'pointerId' | 'width' | 'height' | 'pressure' | 'buttons' | 'clientX' | 'clientY'
+      > & { getCoalescedEvents?: () => PointerEvent[] },
       phase: 'down' | 'move' | 'up'
     ): boolean => {
       if (isAudienceViewer) return false;
@@ -2029,31 +2118,47 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         // In 2-Finger Touch mode, single-finger capacitive touch always draws/erases/creates elements
         // (and 2 fingers pinch-zoom & pan).
         if (touchInputMode === 'two_finger') return true;
-        // In Stylus modes with Active Pen selected, reject capacitive finger touches on the canvas.
+        // In Stylus modes with Active Pen selected, keep exact active_pen rejection behavior untouched.
         if (stylusConfig?.detectionMode !== 'smart_tip') {
           return false;
         }
+        if (rejectedSmartTouchIdsRef.current.has(e.pointerId)) {
+          return false;
+        }
+        if (phase === 'down' || phase === 'move') {
+          smartTouchCoordsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        }
+
+        const metrics = getEffectiveTouchMetrics(e);
+        const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
+        const maxTip = stylusConfig.maxTipSizePx ?? 14;
+        const fitsTip =
+          metrics.size <= maxTip || (hasPenPressure && metrics.size <= maxTip + 6);
+
         if (phase !== 'down' && activeSmartStylusPointerIdRef.current === e.pointerId) {
+          if (metrics.isMeasured && !fitsTip) {
+            abortActiveSmartTipTouch(e.pointerId);
+            return false;
+          }
           return true;
         }
+
         // Note: touch pointermove events never hover (every touch move is physical contact) and usually have e.buttons === 0
         if (phase === 'down' || (phase === 'move' && !isDrawingRef.current)) {
-          const contactSize = Math.max(e.width || 0, e.height || 0);
-          const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
-          const maxTip = stylusConfig.maxTipSizePx ?? 14;
-          const accepted =
-            contactSize <= maxTip || (hasPenPressure && contactSize <= maxTip + 6);
-          if (accepted) {
+          if (fitsTip) {
             activeSmartStylusPointerIdRef.current = e.pointerId;
             isStylusDownRef.current = true;
+            return true;
+          } else {
+            rejectedSmartTouchIdsRef.current.add(e.pointerId);
+            return false;
           }
-          return accepted;
         }
         return false;
       }
       return false;
     },
-    [isAudienceViewer, stylusConfig, touchInputMode]
+    [isAudienceViewer, stylusConfig, touchInputMode, abortActiveSmartTipTouch]
   );
 
   // Pointer Down (React fallback for non-inking modes; inking fast-path runs natively on interactionLayerRef)
@@ -2087,8 +2192,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    // TOUCH CONTROLS MODE: Stylus zoom and pan tool overrides
-    if (touchInputMode === 'stylus_and_hand') {
+    // TOUCH CONTROLS MODE: Stylus zoom and pan tool overrides (both Stylus + Hand and Stylus Only)
+    if (touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') {
       const { x, y } = getStageCoords(e.clientX, e.clientY);
       if (leftToolbarTool === 'zoom') {
         trySetPointerCapture(e.currentTarget, e.pointerId);
@@ -2493,8 +2598,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
     if (isPinchingRef.current && e.pointerType !== 'pen') return;
 
-    // TOUCH CONTROLS MODE: Dynamic Stylus Zoom and Pan
-    if (touchInputMode === 'stylus_and_hand') {
+    // TOUCH CONTROLS MODE: Dynamic Stylus Zoom and Pan (both Stylus + Hand and Stylus Only)
+    if (touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') {
       let isCapturedOrPressed = e.buttons > 0;
       try {
         isCapturedOrPressed = isCapturedOrPressed || e.currentTarget.hasPointerCapture(e.pointerId);
@@ -2915,6 +3020,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (activeSmartStylusPointerIdRef.current === e.pointerId) {
       activeSmartStylusPointerIdRef.current = null;
     }
+    rejectedSmartTouchIdsRef.current.delete(e.pointerId);
+    smartTouchCoordsRef.current.delete(e.pointerId);
+    clearPointerGeometryCache(e.pointerId);
     if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
       isStylusDownRef.current = false;
     }
@@ -3680,6 +3788,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
         activeSmartStylusPointerIdRef.current = null;
       }
+      rejectedSmartTouchIdsRef.current.delete(ev.pointerId);
+      smartTouchCoordsRef.current.delete(ev.pointerId);
+      clearPointerGeometryCache(ev.pointerId);
       if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
         isStylusDownRef.current = false;
       }
@@ -5730,15 +5841,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             className={`drawing-layer absolute inset-0 touch-none ${
               mode === 'drawing' ||
               isAnyEraseActive ||
-              (touchInputMode === 'stylus_and_hand' && leftToolbarTool !== 'pointer')
+              ((touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') &&
+                leftToolbarTool !== 'pointer')
                 ? 'z-[45]'
                 : mode === 'geometric' || mode === 'dictate'
                 ? 'z-[38]'
                 : 'z-20'
             } ${
-              touchInputMode === 'stylus_and_hand' && leftToolbarTool === 'zoom'
+              (touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') &&
+              leftToolbarTool === 'zoom'
                 ? 'cursor-zoom-in'
-                : touchInputMode === 'stylus_and_hand' && leftToolbarTool === 'pan'
+                : (touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') &&
+                  leftToolbarTool === 'pan'
                 ? stylusPanStart
                   ? 'cursor-grabbing'
                   : 'cursor-grab'
@@ -6144,7 +6258,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       {!isAudienceViewer &&
         isActivePage &&
         isVisibleInViewport &&
-        touchInputMode === 'stylus_and_hand' &&
+        (touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') &&
         typeof document !== 'undefined' &&
         createPortal(
           <aside

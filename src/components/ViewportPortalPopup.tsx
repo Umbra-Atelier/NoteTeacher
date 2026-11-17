@@ -83,6 +83,7 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
     ready: false,
   });
   const frozenCoordsRef = useRef<ClampedPopupCoords | null>(null);
+  const lastFlipPlacementRef = useRef<{ desiredTop: number; at: number } | null>(null);
 
   const recomputePosition = useCallback(() => {
     if (freezePosition && frozenCoordsRef.current?.ready) {
@@ -150,7 +151,6 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
       respectHeader,
     });
 
-    // If desiredTop wasn't clamped horizontally out of bounds, also ensure anchor hasn't scrolled far away
     void vw;
 
     if (
@@ -160,6 +160,18 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
     ) {
       return;
     }
+
+    // Oscillation guard: if top oscillates between two values within 50ms due to maxHeight/scrollbar reflow, keep stable
+    const now = performance.now();
+    if (
+      lastFlipPlacementRef.current &&
+      now - lastFlipPlacementRef.current.at < 50 &&
+      Math.abs(lastFlipPlacementRef.current.desiredTop - clamped.top) > 12 &&
+      frozenCoordsRef.current?.ready
+    ) {
+      return;
+    }
+    lastFlipPlacementRef.current = { desiredTop: clamped.top, at: now };
 
     const next: ClampedPopupCoords = {
       left: clamped.left,
@@ -178,11 +190,10 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
     );
   }, [anchorRef, placement, align, gap, respectHeader, freezePosition]);
 
-  // Only recompute synchronously when positioning inputs or parent-rendered children change,
-  // NEVER after AnchoredScreenPopup's own setCoords state update.
+  // Recompute synchronously when positioning config changes; ResizeObserver tracks child/anchor size changes safely via rAF
   useLayoutEffect(() => {
     recomputePosition();
-  }, [recomputePosition, children]);
+  }, [recomputePosition]);
 
   useEffect(() => {
     const popupEl = popupRef.current;

@@ -277,20 +277,37 @@ export const OnboardingTutorialModal: React.FC<OnboardingTutorialModalProps> = (
       const vh = window.innerHeight;
       setViewportSize((prev) => (prev.w === vw && prev.h === vh ? prev : { w: vw, h: vh }));
 
+      const applyRect = (next: HighlightRect | null) => {
+        setHighlightRect((prev) => {
+          if (prev === next) return prev;
+          if (
+            prev &&
+            next &&
+            prev.left === next.left &&
+            prev.top === next.top &&
+            prev.width === next.width &&
+            prev.height === next.height
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      };
+
       if (!currentStep.targetSelector) {
-        setHighlightRect(null);
+        applyRect(null);
         return;
       }
 
       const el = document.querySelector(currentStep.targetSelector) as HTMLElement | null;
       if (!el) {
-        setHighlightRect(null);
+        applyRect(null);
         return;
       }
 
       const r = el.getBoundingClientRect();
       if (r.width < 4 || r.height < 4) {
-        setHighlightRect(null);
+        applyRect(null);
         return;
       }
 
@@ -299,21 +316,20 @@ export const OnboardingTutorialModal: React.FC<OnboardingTutorialModalProps> = (
       if (currentStep.id === 'canvas-overview') {
         const insetX = Math.min(36, Math.round(r.width * 0.05));
         const insetY = Math.min(28, Math.round(r.height * 0.05));
-        const nextRect = {
-          left: Math.max(8, r.left + insetX),
-          top: Math.max(8, r.top + insetY),
-          width: Math.max(120, Math.min(vw - 16, r.width - insetX * 2)),
-          height: Math.max(140, Math.min(vh - r.top - 24, r.height - insetY * 2)),
-        };
-        setHighlightRect(nextRect);
+        applyRect({
+          left: Math.round(Math.max(8, r.left + insetX)),
+          top: Math.round(Math.max(8, r.top + insetY)),
+          width: Math.round(Math.max(120, Math.min(vw - 16, r.width - insetX * 2))),
+          height: Math.round(Math.max(140, Math.min(vh - r.top - 24, r.height - insetY * 2))),
+        });
         return;
       }
 
-      const left = Math.max(4, r.left - pad);
-      const top = Math.max(4, r.top - pad);
-      const right = Math.min(vw - 4, r.right + pad);
-      const bottom = Math.min(vh - 4, r.bottom + pad);
-      setHighlightRect({
+      const left = Math.round(Math.max(4, r.left - pad));
+      const top = Math.round(Math.max(4, r.top - pad));
+      const right = Math.round(Math.min(vw - 4, r.right + pad));
+      const bottom = Math.round(Math.min(vh - 4, r.bottom + pad));
+      applyRect({
         left,
         top,
         width: Math.max(24, right - left),

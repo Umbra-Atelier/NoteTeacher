@@ -94,38 +94,64 @@ export const DictatedTextBoxItem: React.FC<DictatedTextBoxItemProps> = ({
     }
   }, [showTransformBox]);
 
+  const boxDimsRef = useRef({ width: box.width, height: box.height });
+  boxDimsRef.current = { width: box.width, height: box.height };
+
   // Dynamically sync dimensions to rendered text so sideways-expanding nowrap boxes
   // and vertically wrapping boxes always have accurate bounds & transform frames.
   useEffect(() => {
     const el = contentMeasureRef.current;
     if (!el || isReadOnly) return;
 
+    let rafId: number | null = null;
+    let lastRequestedW = -1;
+    let lastRequestedH = -1;
+
     const measureAndSync = () => {
       if (isResizingRef.current) return;
       const measuredW = Math.ceil(el.scrollWidth);
       const measuredH = Math.ceil(el.scrollHeight);
+      const cur = boxDimsRef.current;
 
       if (!box.wrap) {
         const targetW = Math.max(Math.round(box.fontSize * 1.8), 90, measuredW);
         const targetH = Math.max(Math.round(box.fontSize * 1.08), measuredH);
-        if (Math.abs(targetW - box.width) > 2 || Math.abs(targetH - box.height) > 2) {
+        if (
+          (Math.abs(targetW - cur.width) > 2 || Math.abs(targetH - cur.height) > 2) &&
+          (Math.abs(targetW - lastRequestedW) > 1 || Math.abs(targetH - lastRequestedH) > 1)
+        ) {
+          lastRequestedW = targetW;
+          lastRequestedH = targetH;
           onUpdateRef.current({ width: targetW, height: targetH });
         }
       } else {
         const targetH = Math.max(Math.round(box.fontSize * 1.08), measuredH);
-        if (targetH > box.height + 2) {
+        if (targetH > cur.height + 2 && Math.abs(targetH - lastRequestedH) > 1) {
+          lastRequestedH = targetH;
           onUpdateRef.current({ height: targetH });
         }
       }
     };
 
-    measureAndSync();
+    const scheduleMeasure = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        measureAndSync();
+      });
+    };
+
+    scheduleMeasure();
+    let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(measureAndSync);
+      ro = new ResizeObserver(scheduleMeasure);
       ro.observe(el);
-      return () => ro.disconnect();
     }
-  }, [box.text, box.interimText, box.fontSize, box.wrap, box.width, box.height, isReadOnly, isEditing]);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      ro?.disconnect();
+    };
+  }, [box.text, box.interimText, box.fontSize, box.wrap, isReadOnly, isEditing]);
 
   // Smooth Compass Grab Movement (60fps, zoom-aware)
   const startCompassDrag = (startClientX: number, startClientY: number) => {

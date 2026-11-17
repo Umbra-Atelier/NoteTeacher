@@ -82,6 +82,12 @@ import { hsvToHex, hexToHsv, hexWithAlphaPercent } from '../utils/colorUtils';
 import { captureAllMountedWidgets } from '../utils/widgetSnapshotCache';
 import { FileExplorerView } from './explorer/FileExplorerView';
 import { AnchoredScreenPopup } from './ViewportPortalPopup';
+import {
+  ensureTouchGeometryTracker,
+  recordTouchGeometry,
+  getEffectiveTouchMetrics,
+  getTouchContactDiameters,
+} from '../utils/touchGeometry';
 
 interface TopBarRibbonProps {
   mode: AppMode;
@@ -442,6 +448,10 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   const [showTemplateMenu, setShowTemplateMenu] = useState(false);
   const [showAddPageOptions, setShowAddPageOptions] = useState(false);
 
+  useEffect(() => {
+    ensureTouchGeometryTracker();
+  }, []);
+
   const evaluatePointerAsStylus = (
     pointerType: string,
     w: number,
@@ -460,6 +470,67 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
       return false;
     }
     return false;
+  };
+
+  const applySampleFromPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    const metrics = getEffectiveTouchMetrics(e.nativeEvent);
+    const w = metrics.width;
+    const h = metrics.height;
+    const pressure = e.pressure || 0;
+    const accepted = evaluatePointerAsStylus(e.pointerType, w, h, pressure);
+    setLastStylusSample({
+      pointerType: e.pointerType,
+      width: w,
+      height: h,
+      pressure: Number(pressure.toFixed(2)),
+      tiltX: Math.round(e.tiltX || 0),
+      tiltY: Math.round(e.tiltY || 0),
+      accepted,
+    });
+    return { w, h, size: metrics.size, accepted };
+  };
+
+  const applySampleFromTouch = (e: React.TouchEvent<HTMLDivElement>, updateDots: boolean) => {
+    recordTouchGeometry(e.nativeEvent);
+    const t = e.changedTouches[0] || e.touches[0];
+    if (!t) return;
+    const geom = getTouchContactDiameters(t);
+    if (!geom.isMeasured) return;
+    const w = geom.width;
+    const h = geom.height;
+    const pType = geom.touchType === 'stylus' ? 'pen' : 'touch';
+    const accepted = evaluatePointerAsStylus(pType, w, h, geom.force);
+    setLastStylusSample((prev) => {
+      if (prev && prev.pointerType === 'pen' && pType !== 'pen') return prev;
+      return {
+        pointerType: pType,
+        width: w,
+        height: h,
+        pressure: Number((geom.force || prev?.pressure || 0).toFixed(2)),
+        tiltX: prev?.tiltX ?? 0,
+        tiltY: prev?.tiltY ?? 0,
+        accepted,
+      };
+    });
+    if (updateDots) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const tx = t.clientX - rect.left;
+      const ty = t.clientY - rect.top;
+      setTestModalDots((prev) => {
+        if (prev.length === 0) return prev;
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (
+            next[i].pointerType === pType &&
+            Math.hypot(next[i].x - tx, next[i].y - ty) < 48
+          ) {
+            next[i] = { ...next[i], size: geom.size, accepted };
+            break;
+          }
+        }
+        return next;
+      });
+    }
   };
 
   // File input & popover trigger refs
@@ -3086,18 +3157,23 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 <div
                   onPointerDown={(e) => {
                     e.stopPropagation();
-                    const w = Math.round(e.width || 1);
-                    const h = Math.round(e.height || 1);
-                    const accepted = evaluatePointerAsStylus(e.pointerType, w, h, e.pressure || 0);
-                    setLastStylusSample({
-                      pointerType: e.pointerType,
-                      width: w,
-                      height: h,
-                      pressure: Number((e.pressure || 0).toFixed(2)),
-                      tiltX: Math.round(e.tiltX || 0),
-                      tiltY: Math.round(e.tiltY || 0),
-                      accepted,
-                    });
+                    applySampleFromPointer(e);
+                  }}
+                  onPointerMove={(e) => {
+                    if (e.buttons > 0 || e.pointerType === 'touch') {
+                      const metrics = getEffectiveTouchMetrics(e.nativeEvent);
+                      if (metrics.isMeasured) {
+                        applySampleFromPointer(e);
+                      }
+                    }
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
+                    applySampleFromTouch(e, false);
+                  }}
+                  onTouchMove={(e) => {
+                    e.stopPropagation();
+                    applySampleFromTouch(e, false);
                   }}
                   style={{ touchAction: 'none' }}
                   className="px-3 py-1.5 rounded-xl border-2 border-dashed border-cyan-400 dark:border-cyan-700 bg-cyan-50/60 dark:bg-cyan-950/30 hover:bg-cyan-50 dark:hover:bg-cyan-950/50 cursor-crosshair select-none flex flex-col justify-center min-w-[150px]"
@@ -3190,24 +3266,39 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                     const rect = e.currentTarget.getBoundingClientRect();
                     const x = e.clientX - rect.left;
                     const y = e.clientY - rect.top;
-                    const w = Math.round(e.width || 1);
-                    const h = Math.round(e.height || 1);
-                    const size = Math.max(w, h);
-                    const accepted = evaluatePointerAsStylus(e.pointerType, w, h, e.pressure || 0);
-                    setLastStylusSample({
-                      pointerType: e.pointerType,
-                      width: w,
-                      height: h,
-                      pressure: Number((e.pressure || 0).toFixed(2)),
-                      tiltX: Math.round(e.tiltX || 0),
-                      tiltY: Math.round(e.tiltY || 0),
-                      accepted,
-                    });
+                    const { size, accepted } = applySampleFromPointer(e);
                     setTestModalDots((prev) => [
                       ...prev.slice(-18),
                       { id: Date.now() + Math.random(), x, y, pointerType: e.pointerType, size, accepted },
                     ]);
                   }}
+                  onPointerMove={(e) => {
+                    if (e.buttons > 0 || e.pointerType === 'touch') {
+                      const metrics = getEffectiveTouchMetrics(e.nativeEvent);
+                      if (metrics.isMeasured) {
+                        const { size, accepted } = applySampleFromPointer(e);
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const x = e.clientX - rect.left;
+                        const y = e.clientY - rect.top;
+                        setTestModalDots((prev) => {
+                          if (prev.length === 0) return prev;
+                          const next = [...prev];
+                          for (let i = next.length - 1; i >= 0; i--) {
+                            if (
+                              next[i].pointerType === e.pointerType &&
+                              Math.hypot(next[i].x - x, next[i].y - y) < 48
+                            ) {
+                              next[i] = { ...next[i], size, accepted };
+                              break;
+                            }
+                          }
+                          return next;
+                        });
+                      }
+                    }
+                  }}
+                  onTouchStart={(e) => applySampleFromTouch(e, true)}
+                  onTouchMove={(e) => applySampleFromTouch(e, true)}
                   style={{ touchAction: 'none' }}
                   className="relative w-full h-56 rounded-xl border-2 border-dashed border-cyan-400 dark:border-cyan-700 bg-slate-50 dark:bg-slate-950 overflow-hidden cursor-crosshair select-none flex items-center justify-center"
                 >
