@@ -217,7 +217,16 @@ interface CanvasStageProps {
     imageIds?: string[],
     dictateIds?: string[]
   ) => void;
+  // Transformation & rollback callbacks
   onTransformEnd?: () => void;
+  onDiscardTouchArtifacts?: (artifacts: {
+    strokeIds?: string[];
+    shapeIds?: string[];
+    graphIds?: string[];
+    calcIds?: string[];
+    imageIds?: string[];
+    dictateIds?: string[];
+  }) => void;
 
   // Document color registration
   onColorUsed: (hex: string) => void;
@@ -294,6 +303,31 @@ function pointsToSvgPath(points: StrokePoint[]): string {
   }
   d += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
   return d;
+}
+
+// Detect dots or straight-line segments (characteristic of pinching/zooming while a finger is down)
+function isStraightLineOrDotStroke(points?: StrokePoint[]): boolean {
+  if (!points || points.length <= 2) return true;
+  const first = points[0];
+  const last = points[points.length - 1];
+  const chord = Math.hypot(last.x - first.x, last.y - first.y);
+  let pathLen = 0;
+  for (let i = 1; i < points.length; i++) {
+    pathLen += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  if (pathLen < 10) return true;
+  if (chord < 1e-3) return false;
+  if (chord / pathLen < 0.92) return false;
+  const ux = (last.x - first.x) / chord;
+  const uy = (last.y - first.y) / chord;
+  let maxDev = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const dx = points[i].x - first.x;
+    const dy = points[i].y - first.y;
+    const perp = Math.abs(dx * uy - dy * ux);
+    if (perp > maxDev) maxDev = perp;
+  }
+  return maxDev <= Math.max(5, pathLen * 0.065);
 }
 
 const PDF_TILE_COLS = 3;
@@ -397,6 +431,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   onTransformItems,
   onRotateItems,
   onTransformEnd,
+  onDiscardTouchArtifacts,
   onColorUsed,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -768,6 +803,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const activeRecoveryWindowPointerIdRef = useRef<number | null>(null);
   const activeSmartStylusPointerIdRef = useRef<number | null>(null);
   const rejectedSmartTouchIdsRef = useRef<Set<number>>(new Set());
+  const palmTouchPointerIdsRef = useRef<Set<number>>(new Set());
   const smartTouchCoordsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const activePointerIdRef = useRef<number | null>(null);
   const isDrawingRef = useRef<boolean>(false);
@@ -777,6 +813,62 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const pendingLiveCanvasClearRef = useRef<boolean>(false);
   const liveStrokeStreamTimerRef = useRef<number | null>(null);
   const lastCommittedBridgeRef = useRef<{ pointerId: number; point: StrokePoint; time: number } | null>(null);
+
+  // Guilty-until-proven-innocent tracking for non-pen touch inputs before/during 2-finger pinch-to-zoom
+  const povScaleRef = useRef<number>(povScale);
+  povScaleRef.current = povScale;
+  const onDiscardTouchArtifactsRef = useRef(onDiscardTouchArtifacts);
+  onDiscardTouchArtifactsRef.current = onDiscardTouchArtifacts;
+  const activeStrokeMetaRef = useRef<{
+    pointerId: number;
+    pointerType: string;
+    startedAt: number;
+    startZoom: number;
+    startPovScale: number;
+    startPanX: number;
+    startPanY: number;
+    endedByCancel: boolean;
+  } | null>(null);
+  const activePointerMetaRef = useRef<
+    Map<
+      number,
+      {
+        pointerType: string;
+        downAt: number;
+        startZoom: number;
+        startPovScale: number;
+        startPanX: number;
+        startPanY: number;
+      }
+    >
+  >(new Map());
+  const recentTouchArtifactsRef = useRef<
+    Array<{
+      kind: 'stroke' | 'shape' | 'graph' | 'calc' | 'dictate';
+      id: string;
+      pointerId: number;
+      startedAt: number;
+      createdAt: number;
+      endedByCancel: boolean;
+      startZoom: number;
+      startPovScale: number;
+      startPanX: number;
+      startPanY: number;
+      endZoom: number;
+      endPovScale: number;
+      endPanX: number;
+      endPanY: number;
+      points?: StrokePoint[];
+    }>
+  >([]);
+  const activeTouchPointerIdsRef = useRef<Set<number>>(new Set());
+  const pinchSuppressedTouchPointerIdsRef = useRef<Set<number>>(new Set());
+  const activeTouchCountRef = useRef<number>(0);
+  const lastAllTouchLiftAtRef = useRef<number>(0);
+  const lastPinchEndedAtRef = useRef<number>(0);
+  const touchMotionTrackRef = useRef<
+    Map<number, { startX: number; startY: number; lastX: number; lastY: number; downAt: number }>
+  >(new Map());
 
   // Active Shape Drag State
   const [shapeDragStart, setShapeDragStart] = useState<{ x: number; y: number } | null>(null);
@@ -1145,6 +1237,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (!isDrawingRef.current) return;
     stopLiveStrokeStream();
     const pts = currentPointsRef.current.slice();
+    const strokeMeta = activeStrokeMetaRef.current;
+    activeStrokeMetaRef.current = null;
     isDrawingRef.current = false;
     currentPointsRef.current = [];
     renderedPointCountRef.current = 0;
@@ -1165,14 +1259,33 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       onLiveOverlayChange(null);
     }
 
+    // Never commit a non-hardware-pen touch stroke if viewport zoomed/panned while it was drawn or pinch is active
+    if (strokeMeta?.pointerType === 'touch') {
+      const vp = zoomPanRef.current;
+      const vpMoved =
+        Math.abs(vp.zoomScale - strokeMeta.startZoom) > 0.002 ||
+        Math.abs(povScaleRef.current - strokeMeta.startPovScale) > 0.002 ||
+        Math.hypot(vp.panOffset.x - strokeMeta.startPanX, vp.panOffset.y - strokeMeta.startPanY) > 1.5;
+      if (
+        vpMoved ||
+        isPinchingRef.current ||
+        activeTouchCountRef.current >= 2 ||
+        pinchSuppressedTouchPointerIdsRef.current.has(strokeMeta.pointerId)
+      ) {
+        clearLiveCanvas();
+        return;
+      }
+    }
+
     if (pts.length >= 1) {
+      const strokeId = `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       pendingLiveCanvasClearRef.current = true;
       if (!isActivePage && onActivatePage) {
         onActivatePage();
       }
       onColorUsed(currentColor);
       onAddStroke({
-        id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        id: strokeId,
         pageId,
         tool: penType,
         color: currentColor,
@@ -1180,6 +1293,32 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         opacity: penType === 'highlighter' ? 0.35 : 1,
         points: pts,
       });
+
+      if (strokeMeta?.pointerType === 'touch') {
+        const vp = zoomPanRef.current;
+        const now = Date.now();
+        recentTouchArtifactsRef.current = [
+          ...recentTouchArtifactsRef.current.filter((a) => now - a.createdAt < 1200),
+          {
+            kind: 'stroke',
+            id: strokeId,
+            pointerId: strokeMeta.pointerId,
+            startedAt: strokeMeta.startedAt,
+            createdAt: now,
+            endedByCancel: strokeMeta.endedByCancel,
+            startZoom: strokeMeta.startZoom,
+            startPovScale: strokeMeta.startPovScale,
+            startPanX: strokeMeta.startPanX,
+            startPanY: strokeMeta.startPanY,
+            endZoom: vp.zoomScale,
+            endPovScale: povScaleRef.current,
+            endPanX: vp.panOffset.x,
+            endPanY: vp.panOffset.y,
+            points: pts,
+          },
+        ];
+      }
+
       window.setTimeout(() => {
         if (pendingLiveCanvasClearRef.current && !isDrawingRef.current) {
           pendingLiveCanvasClearRef.current = false;
@@ -1212,10 +1351,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         zeroContactMoveStreakRef.current.delete(ev.pointerId);
         lastStylusEventAtRef.current = Date.now();
       }
+      if (ev.pointerType === 'touch') {
+        activeTouchPointerIdsRef.current.delete(ev.pointerId);
+        pinchSuppressedTouchPointerIdsRef.current.delete(ev.pointerId);
+        if (
+          ev.type === 'pointercancel' &&
+          activeStrokeMetaRef.current?.pointerId === ev.pointerId
+        ) {
+          activeStrokeMetaRef.current.endedByCancel = true;
+        }
+      }
+      activePointerMetaRef.current.delete(ev.pointerId);
       if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
         activeSmartStylusPointerIdRef.current = null;
       }
       rejectedSmartTouchIdsRef.current.delete(ev.pointerId);
+      palmTouchPointerIdsRef.current.delete(ev.pointerId);
       smartTouchCoordsRef.current.delete(ev.pointerId);
       clearPointerGeometryCache(ev.pointerId);
       if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
@@ -1226,7 +1377,19 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
       if (activePointerIdRef.current === ev.pointerId) {
         if (isDrawingRef.current) {
-          commitActiveDrawingStrokeRef.current();
+          if (
+            ev.pointerType === 'touch' &&
+            (isPinchingRef.current || activeTouchCountRef.current >= 2)
+          ) {
+            isDrawingRef.current = false;
+            currentPointsRef.current = [];
+            renderedPointCountRef.current = 0;
+            activeStrokeMetaRef.current = null;
+            stopLiveStrokeStream();
+            clearLiveCanvas();
+          } else {
+            commitActiveDrawingStrokeRef.current();
+          }
         }
         activePointerIdRef.current = null;
       }
@@ -1469,11 +1632,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     []
   );
 
-  // Helper to cleanly cancel a provisional Smart Tip stroke when real finger size (> maxTip) or 2-finger pinch arrives
+  // Helper to cleanly cancel a provisional Smart Tip / single-finger touch stroke when wide finger or 2-finger pinch arrives
   const abortActiveSmartTipTouch = useCallback(
     (pointerId?: number) => {
-      const targetId = pointerId ?? activeSmartStylusPointerIdRef.current;
-      if (targetId !== null && targetId !== undefined) {
+      // Never abort an active hardware stylus stroke
+      if (
+        contactingPenIdsRef.current.size > 0 ||
+        activeStrokeMetaRef.current?.pointerType === 'pen'
+      ) {
+        return;
+      }
+      const targetId = pointerId ?? activeSmartStylusPointerIdRef.current ?? undefined;
+      if (targetId !== undefined) {
         rejectedSmartTouchIdsRef.current.add(targetId);
         smartTouchCoordsRef.current.delete(targetId);
         const layer = interactionLayerRef.current;
@@ -1485,18 +1655,31 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (contactingPenIdsRef.current.size === 0) {
         isStylusDownRef.current = false;
       }
-      if (targetId === undefined || activePointerIdRef.current === targetId) {
+      if (
+        targetId == null ||
+        activePointerIdRef.current === targetId ||
+        activeStrokeMetaRef.current?.pointerType === 'touch'
+      ) {
         activePointerIdRef.current = null;
+        activeStrokeMetaRef.current = null;
         if (isDrawingRef.current) {
           isDrawingRef.current = false;
           currentPointsRef.current = [];
+          renderedPointCountRef.current = 0;
           stopLiveStrokeStream();
           clearLiveCanvas();
+          if (lastLiveOverlaySentNonNullRef.current && onLiveOverlayChange && !isAudienceViewer) {
+            lastLiveOverlaySentNonNullRef.current = false;
+            liveOverlayThrottleRef.current = Date.now();
+            onLiveOverlayChange(null);
+          }
         }
         setShapeDragStart(null);
         setShapeDragCurrent(null);
         setGraphDragStart(null);
         setGraphDragCurrent(null);
+        setDictateDragStart(null);
+        setDictateDragCurrent(null);
         setAngleStep('idle');
         setAngleCenter(null);
         setEraserSelectStart(null);
@@ -1509,15 +1692,132 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         setPhotoCropClientCurrent(null);
       }
     },
-    [clearLiveCanvas, stopLiveStrokeStream]
+    [clearLiveCanvas, stopLiveStrokeStream, onLiveOverlayChange, isAudienceViewer]
   );
+
+  // Retroactively delete provisional touch strokes/elements created right as a 2-finger pinch-to-zoom began
+  const cleanupGuiltyTouchArtifacts = useCallback(
+    (reason: 'pinch_start' | 'zoom_drift') => {
+      if (stylusConfig.detectionMode === 'active_pen' && touchInputMode !== 'two_finger') {
+        return;
+      }
+      if (contactingPenIdsRef.current.size > 0) return;
+
+      // Suppress all currently down touch pointers so lifting one finger before the other never emits trailing strokes
+      activeTouchPointerIdsRef.current.forEach((pid) => {
+        pinchSuppressedTouchPointerIdsRef.current.add(pid);
+      });
+      if (activeSmartStylusPointerIdRef.current !== null) {
+        pinchSuppressedTouchPointerIdsRef.current.add(activeSmartStylusPointerIdRef.current);
+      }
+      if (activePointerIdRef.current !== null && activeStrokeMetaRef.current?.pointerType === 'touch') {
+        pinchSuppressedTouchPointerIdsRef.current.add(activePointerIdRef.current);
+      }
+
+      abortActiveSmartTipTouch(activeSmartStylusPointerIdRef.current ?? undefined);
+
+      const now = Date.now();
+      const isSmartTipMode =
+        touchInputMode === 'two_finger_stylus' && stylusConfig.detectionMode === 'smart_tip';
+      const maxWindowMs = isSmartTipMode ? 650 : 450;
+
+      const strokeIds: string[] = [];
+      const shapeIds: string[] = [];
+      const graphIds: string[] = [];
+      const calcIds: string[] = [];
+      const dictateIds: string[] = [];
+      const survivors: typeof recentTouchArtifactsRef.current = [];
+
+      for (const item of recentTouchArtifactsRef.current) {
+        if (now - item.createdAt > 1200) continue;
+
+        const vpMoved =
+          Math.abs(item.endZoom - item.startZoom) > 0.001 ||
+          Math.abs(item.endPovScale - item.startPovScale) > 0.001 ||
+          Math.hypot(item.endPanX - item.startPanX, item.endPanY - item.startPanY) > 1.2;
+        const ageMs = now - item.createdAt;
+        const overlappedPinch =
+          activeTouchPointerIdsRef.current.has(item.pointerId) ||
+          pinchSuppressedTouchPointerIdsRef.current.has(item.pointerId) ||
+          (lastAllTouchLiftAtRef.current > 0 &&
+            Math.abs(item.createdAt - lastAllTouchLiftAtRef.current) < 40 &&
+            now - lastAllTouchLiftAtRef.current < 180);
+
+        let isGuilty = false;
+        if (item.endedByCancel || vpMoved || overlappedPinch) {
+          isGuilty = true;
+        } else if (reason === 'pinch_start' && ageMs <= maxWindowMs) {
+          if (item.kind !== 'stroke') {
+            isGuilty = ageMs <= (isSmartTipMode ? 550 : 280);
+          } else if (isSmartTipMode) {
+            isGuilty =
+              ageMs <= 380 ||
+              isStraightLineOrDotStroke(item.points) ||
+              item.createdAt - item.startedAt <= 320;
+          } else {
+            isGuilty =
+              ageMs <= 160 ||
+              (isStraightLineOrDotStroke(item.points) && ageMs <= 260);
+          }
+        } else if (reason === 'zoom_drift' && ageMs <= 320) {
+          if (item.kind === 'stroke' && isStraightLineOrDotStroke(item.points)) {
+            isGuilty = true;
+          }
+        }
+
+        if (isGuilty) {
+          if (item.kind === 'stroke') strokeIds.push(item.id);
+          else if (item.kind === 'shape') shapeIds.push(item.id);
+          else if (item.kind === 'graph') graphIds.push(item.id);
+          else if (item.kind === 'calc') calcIds.push(item.id);
+          else if (item.kind === 'dictate') dictateIds.push(item.id);
+        } else {
+          survivors.push(item);
+        }
+      }
+
+      recentTouchArtifactsRef.current = survivors;
+
+      if (
+        strokeIds.length > 0 ||
+        shapeIds.length > 0 ||
+        graphIds.length > 0 ||
+        calcIds.length > 0 ||
+        dictateIds.length > 0
+      ) {
+        onDiscardTouchArtifactsRef.current?.({
+          strokeIds,
+          shapeIds,
+          graphIds,
+          calcIds,
+          dictateIds,
+        });
+      }
+    },
+    [abortActiveSmartTipTouch, stylusConfig.detectionMode, touchInputMode]
+  );
+
+  // If viewport zooms/pans (even from outer workspace POV pinch) while a touch stroke is actively drawing,
+  // abort immediately so zooming never creates straight-line drawing artifacts.
+  useEffect(() => {
+    const meta = activeStrokeMetaRef.current;
+    if (meta?.pointerType === 'touch' && isDrawingRef.current) {
+      const vpMoved =
+        Math.abs(activeZoomScale - meta.startZoom) > 0.002 ||
+        Math.abs(povScale - meta.startPovScale) > 0.002 ||
+        Math.hypot(activePanOffset.x - meta.startPanX, activePanOffset.y - meta.startPanY) > 1.5;
+      if (vpMoved) {
+        cleanupGuiltyTouchArtifacts('zoom_drift');
+      }
+    }
+  }, [activeZoomScale, activePanOffset.x, activePanOffset.y, povScale, cleanupGuiltyTouchArtifacts]);
 
   // Two-Finger Pinch & Stretch to Zoom: Centers zooming exactly on finger midpoint
   useEffect(() => {
     const container = containerRef.current;
     if (!container || isAudienceViewer) return;
 
-    const getActiveFingerTouches = (touches: TouchList): Touch[] => {
+    const getActiveFingerTouches = (touches: TouchList, forMove: boolean): Touch[] => {
       const list = Array.from(touches);
       // Always exclude explicit hardware stylus contacts so resting palm + active pen never reads as 2 fingers
       const nonStylusList = list.filter(
@@ -1528,16 +1828,67 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           return nonStylusList;
         }
         if (stylusConfig.detectionMode === 'smart_tip') {
+          if (contactingPenIdsRef.current.size > 0) {
+            return [];
+          }
+          if (nonStylusList.length < 2) {
+            return nonStylusList;
+          }
           const maxTip = stylusConfig.maxTipSizePx ?? 14;
-          return nonStylusList.filter((t) => {
-            const geom = getTouchContactDiameters(t);
-            // Ignore unmeasured <= 1px placeholder radii so two-finger pinch never filters itself out
-            if (geom.isMeasured && geom.size <= maxTip) {
-              return false;
-            }
-            return true;
+          const palmThreshold = Math.max(48, maxTip * 2.8);
+          const smallMeasured = nonStylusList.filter((t) => {
+            const g = getTouchContactDiameters(t);
+            return g.isMeasured && g.size <= maxTip;
           });
+          const palmMeasured = nonStylusList.filter((t) => {
+            const g = getTouchContactDiameters(t);
+            return g.isMeasured && g.size >= palmThreshold;
+          });
+          // Distinguish a stationary large resting palm + small passive stylus from two fingers pinching
+          if (palmMeasured.length > 0 && smallMeasured.length > 0) {
+            const palmMoved = palmMeasured.some((pt) => {
+              const tr = touchMotionTrackRef.current.get(pt.identifier);
+              return tr ? Math.hypot(pt.clientX - tr.startX, pt.clientY - tr.startY) >= 10 : false;
+            });
+            if (!palmMoved) {
+              return nonStylusList.filter((t) => !smallMeasured.includes(t));
+            }
+          }
+          // If one touch already drew a long/curved stroke (> 350ms) and a 2nd wide touch just landed,
+          // wait until touches move >= 6px before confirming pinch so resting side-of-hand doesn't cancel writing
+          if (
+            !forMove &&
+            !isPinchingRef.current &&
+            isDrawingRef.current &&
+            activeStrokeMetaRef.current?.pointerType === 'touch' &&
+            Date.now() - activeStrokeMetaRef.current.startedAt > 350 &&
+            currentPointsRef.current.length > 6 &&
+            !isStraightLineOrDotStroke(currentPointsRef.current)
+          ) {
+            return smallMeasured.length > 0
+              ? nonStylusList.filter((t) => !smallMeasured.includes(t))
+              : nonStylusList;
+          }
+          if (
+            forMove &&
+            !isPinchingRef.current &&
+            isDrawingRef.current &&
+            activeStrokeMetaRef.current?.pointerType === 'touch' &&
+            Date.now() - activeStrokeMetaRef.current.startedAt > 350 &&
+            currentPointsRef.current.length > 6 &&
+            !isStraightLineOrDotStroke(currentPointsRef.current)
+          ) {
+            const movedCount = nonStylusList.filter((t) => {
+              const tr = touchMotionTrackRef.current.get(t.identifier);
+              return tr ? Math.hypot(t.clientX - tr.startX, t.clientY - tr.startY) >= 6 : false;
+            }).length;
+            if (movedCount < 2 && smallMeasured.length > 0) {
+              return nonStylusList.filter((t) => !smallMeasured.includes(t));
+            }
+          }
+          return nonStylusList;
         }
+        // Active Pen mode: preserve exact untouched active_pen behavior
         const hasTouchTypeApi = list.some(
           (t) => typeof (t as Touch & { touchType?: string }).touchType === 'string'
         );
@@ -1547,6 +1898,30 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return isStylusDownRef.current || contactingPenIdsRef.current.size > 0 ? [] : nonStylusList;
       }
       return nonStylusList;
+    };
+
+    const confirmAndInitPinch = (fingerTouches: Touch[]) => {
+      isPinchingRef.current = true;
+      cleanupGuiltyTouchArtifacts('pinch_start');
+
+      const t0 = fingerTouches[0];
+      const t1 = fingerTouches[1];
+      const dist = Math.max(1, Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY));
+      const mid = {
+        x: (t0.clientX + t1.clientX) / 2,
+        y: (t0.clientY + t1.clientY) / 2,
+      };
+
+      const rect = container.getBoundingClientRect();
+      const outerScale = rect.width / (container.clientWidth || rect.width || 1);
+      const localMidX = (mid.x - rect.left) / outerScale;
+      const localMidY = (mid.y - rect.top) / outerScale;
+      const focalStageX = (localMidX - panOffset.x) / zoomScale;
+      const focalStageY = (localMidY - panOffset.y) / zoomScale;
+
+      pinchInitialDistRef.current = dist;
+      pinchInitialScaleRef.current = zoomScale;
+      pinchFocalStageRef.current = { x: focalStageX, y: focalStageY };
     };
 
     const disqualifySmartTipIfTouchTooWide = (e: TouchEvent) => {
@@ -1581,6 +1956,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     };
 
     const handleTouchStart = (e: TouchEvent) => {
+      const now = Date.now();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const ct = e.changedTouches[i];
+        touchMotionTrackRef.current.set(ct.identifier, {
+          startX: ct.clientX,
+          startY: ct.clientY,
+          lastX: ct.clientX,
+          lastY: ct.clientY,
+          downAt: now,
+        });
+      }
       recordTouchGeometry(e);
       disqualifySmartTipIfTouchTooWide(e);
 
@@ -1608,38 +1994,32 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
-      const fingerTouches = getActiveFingerTouches(e.touches);
+      const fingerTouches = getActiveFingerTouches(e.touches, false);
+      activeTouchCountRef.current =
+        stylusConfig.detectionMode === 'smart_tip' ? fingerTouches.length : e.touches.length;
       if (fingerTouches.length >= 2) {
         e.preventDefault();
-        isPinchingRef.current = true;
-
-        // Abort any provisional single-finger or smart-tip touch stroke when 2 fingers initiate pinch/pan
-        if (activeSmartStylusPointerIdRef.current !== null || isDrawingRef.current) {
-          abortActiveSmartTipTouch(activeSmartStylusPointerIdRef.current ?? undefined);
-        }
-
-        const t0 = fingerTouches[0];
-        const t1 = fingerTouches[1];
-        const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
-        const mid = {
-          x: (t0.clientX + t1.clientX) / 2,
-          y: (t0.clientY + t1.clientY) / 2,
-        };
-
-        const rect = container.getBoundingClientRect();
-        const outerScale = rect.width / (container.clientWidth || rect.width || 1);
-        const localMidX = (mid.x - rect.left) / outerScale;
-        const localMidY = (mid.y - rect.top) / outerScale;
-        const focalStageX = (localMidX - panOffset.x) / zoomScale;
-        const focalStageY = (localMidY - panOffset.y) / zoomScale;
-
-        pinchInitialDistRef.current = dist;
-        pinchInitialScaleRef.current = zoomScale;
-        pinchFocalStageRef.current = { x: focalStageX, y: focalStageY };
+        confirmAndInitPinch(fingerTouches);
       }
     };
 
     const handleTouchMove = (e: TouchEvent) => {
+      for (let i = 0; i < e.touches.length; i++) {
+        const t = e.touches[i];
+        const existing = touchMotionTrackRef.current.get(t.identifier);
+        if (existing) {
+          existing.lastX = t.clientX;
+          existing.lastY = t.clientY;
+        } else {
+          touchMotionTrackRef.current.set(t.identifier, {
+            startX: t.clientX,
+            startY: t.clientY,
+            lastX: t.clientX,
+            lastY: t.clientY,
+            downAt: Date.now(),
+          });
+        }
+      }
       recordTouchGeometry(e);
       disqualifySmartTipIfTouchTooWide(e);
 
@@ -1651,9 +2031,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
+      if (contactingPenIdsRef.current.size > 0 || Date.now() - lastStylusEventAtRef.current < 220) {
+        isPinchingRef.current = false;
+        pinchInitialDistRef.current = null;
+        pinchFocalStageRef.current = null;
+        return;
+      }
+
+      // Active Pen mode: preserve untouched active_pen block
       if (
-        contactingPenIdsRef.current.size > 0 ||
-        ((isStylusDownRef.current || isDrawingRef.current) && !isPinchingRef.current)
+        stylusConfig.detectionMode !== 'smart_tip' &&
+        (isStylusDownRef.current || (isDrawingRef.current && touchInputMode !== 'two_finger')) &&
+        !isPinchingRef.current
       ) {
         isPinchingRef.current = false;
         pinchInitialDistRef.current = null;
@@ -1661,14 +2050,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
-      if (e.touches.length < 2) {
+      const fingerTouches = getActiveFingerTouches(e.touches, true);
+      activeTouchCountRef.current =
+        stylusConfig.detectionMode === 'smart_tip' ? fingerTouches.length : e.touches.length;
+      if (e.touches.length < 2 || fingerTouches.length < 2) {
+        if (isPinchingRef.current) {
+          lastPinchEndedAtRef.current = Date.now();
+        }
         isPinchingRef.current = false;
         pinchInitialDistRef.current = null;
         pinchFocalStageRef.current = null;
         return;
       }
+      if (fingerTouches.length >= 2 && !isPinchingRef.current) {
+        e.preventDefault();
+        confirmAndInitPinch(fingerTouches);
+      }
 
-      const fingerTouches = getActiveFingerTouches(e.touches);
       if (
         fingerTouches.length >= 2 &&
         isPinchingRef.current &&
@@ -1678,7 +2076,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         e.preventDefault();
         const t0 = fingerTouches[0];
         const t1 = fingerTouches[1];
-        const currentDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        const currentDist = Math.max(1, Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY));
         const currentMid = {
           x: (t0.clientX + t1.clientX) / 2,
           y: (t0.clientY + t1.clientY) / 2,
@@ -1703,9 +2101,47 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     };
 
     const handleTouchEnd = (e: TouchEvent) => {
+      const alive = new Set<number>();
+      for (let i = 0; i < e.touches.length; i++) {
+        alive.add(e.touches[i].identifier);
+      }
+      Array.from(touchMotionTrackRef.current.keys()).forEach((id) => {
+        if (!alive.has(id)) touchMotionTrackRef.current.delete(id);
+      });
+      if (e.touches.length === 0) {
+        lastAllTouchLiftAtRef.current = Date.now();
+        palmTouchPointerIdsRef.current.clear();
+        activeTouchPointerIdsRef.current.clear();
+        pinchSuppressedTouchPointerIdsRef.current.clear();
+        rejectedSmartTouchIdsRef.current.clear();
+        smartTouchCoordsRef.current.clear();
+        if (activeSmartStylusPointerIdRef.current !== null) {
+          activeSmartStylusPointerIdRef.current = null;
+        }
+        if (
+          activePointerIdRef.current !== null &&
+          !contactingPenIdsRef.current.has(activePointerIdRef.current) &&
+          activePointerMetaRef.current.get(activePointerIdRef.current)?.pointerType === 'touch'
+        ) {
+          activePointerIdRef.current = null;
+        }
+        activePointerMetaRef.current.forEach((meta, pid) => {
+          if (meta.pointerType === 'touch') {
+            activePointerMetaRef.current.delete(pid);
+          }
+        });
+        if (contactingPenIdsRef.current.size === 0) {
+          isStylusDownRef.current = false;
+        }
+      }
       recordTouchGeometry(e);
-      const fingerTouches = getActiveFingerTouches(e.touches);
+      const fingerTouches = getActiveFingerTouches(e.touches, false);
+      activeTouchCountRef.current =
+        stylusConfig.detectionMode === 'smart_tip' ? fingerTouches.length : e.touches.length;
       if (fingerTouches.length < 2) {
+        if (isPinchingRef.current) {
+          lastPinchEndedAtRef.current = Date.now();
+        }
         isPinchingRef.current = false;
         pinchInitialDistRef.current = null;
         pinchFocalStageRef.current = null;
@@ -1747,7 +2183,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       container.removeEventListener('touchcancel', handleTouchEnd);
       container.removeEventListener('wheel', handleWheel);
     };
-  }, [mode, zoomScale, panOffset, touchInputMode, stylusConfig, isAudienceViewer, abortActiveSmartTipTouch]);
+  }, [
+    mode,
+    zoomScale,
+    panOffset,
+    touchInputMode,
+    stylusConfig,
+    isAudienceViewer,
+    abortActiveSmartTipTouch,
+    cleanupGuiltyTouchArtifacts,
+  ]);
 
   // Picture Copy: Capture real pixel-exact screenshot of cropped canvas region with robust native 2D composite fallback
   const captureSquareSnippet = async (
@@ -2129,14 +2574,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           smartTouchCoordsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
         }
 
+        // Prevent a 2nd simultaneous touch pointer from overwriting an already-active smart-tip pointer
+        if (
+          phase === 'down' &&
+          activeSmartStylusPointerIdRef.current !== null &&
+          activeSmartStylusPointerIdRef.current !== e.pointerId &&
+          smartTouchCoordsRef.current.has(activeSmartStylusPointerIdRef.current)
+        ) {
+          return false;
+        }
+
         const metrics = getEffectiveTouchMetrics(e);
         const hasPenPressure = e.pressure > 0 && Math.abs(e.pressure - 0.5) > 0.01;
         const maxTip = stylusConfig.maxTipSizePx ?? 14;
         const fitsTip =
           metrics.size <= maxTip || (hasPenPressure && metrics.size <= maxTip + 6);
 
+        const palmThreshold = Math.max(48, maxTip * 2.8);
+
         if (phase !== 'down' && activeSmartStylusPointerIdRef.current === e.pointerId) {
           if (metrics.isMeasured && !fitsTip) {
+            if (metrics.size >= palmThreshold) {
+              palmTouchPointerIdsRef.current.add(e.pointerId);
+            }
             abortActiveSmartTipTouch(e.pointerId);
             return false;
           }
@@ -2145,12 +2605,25 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
         // Note: touch pointermove events never hover (every touch move is physical contact) and usually have e.buttons === 0
         if (phase === 'down' || (phase === 'move' && !isDrawingRef.current)) {
+          if (
+            phase === 'move' &&
+            (isPinchingRef.current ||
+              activeTouchCountRef.current >= 2 ||
+              pinchSuppressedTouchPointerIdsRef.current.has(e.pointerId) ||
+              Date.now() - lastPinchEndedAtRef.current < 260)
+          ) {
+            return false;
+          }
           if (fitsTip) {
+            palmTouchPointerIdsRef.current.delete(e.pointerId);
             activeSmartStylusPointerIdRef.current = e.pointerId;
             isStylusDownRef.current = true;
             return true;
           } else {
             rejectedSmartTouchIdsRef.current.add(e.pointerId);
+            if (metrics.isMeasured && metrics.size >= palmThreshold) {
+              palmTouchPointerIdsRef.current.add(e.pointerId);
+            }
             return false;
           }
         }
@@ -2174,7 +2647,37 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       isPinchingRef.current = false;
     }
 
+    let hadOtherActiveTouch = false;
+    if (e.pointerType === 'touch') {
+      if (!isPinchingRef.current && activeTouchCountRef.current < 2) {
+        pinchSuppressedTouchPointerIdsRef.current.delete(e.pointerId);
+      }
+      hadOtherActiveTouch = Array.from(activeTouchPointerIdsRef.current).some(
+        (id) =>
+          id !== e.pointerId &&
+          !(stylusConfig?.detectionMode === 'smart_tip' && palmTouchPointerIdsRef.current.has(id))
+      );
+      activeTouchPointerIdsRef.current.add(e.pointerId);
+      activePointerMetaRef.current.set(e.pointerId, {
+        pointerType: e.pointerType,
+        downAt: Date.now(),
+        startZoom: zoomPanRef.current.zoomScale,
+        startPovScale: povScaleRef.current,
+        startPanX: zoomPanRef.current.panOffset.x,
+        startPanY: zoomPanRef.current.panOffset.y,
+      });
+    }
+
     if (!isPointerAccepted(e, 'down')) {
+      return;
+    }
+
+    if (
+      e.pointerType === 'touch' &&
+      (isPinchingRef.current || activeTouchCountRef.current >= 2 || hadOtherActiveTouch) &&
+      (touchInputMode === 'two_finger' ||
+        (touchInputMode === 'two_finger_stylus' && stylusConfig?.detectionMode === 'smart_tip'))
+    ) {
       return;
     }
 
@@ -2299,8 +2802,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
     // CALCULATOR MODE
     if (mode === 'calculator') {
+      const calcId = `calc-${Date.now()}`;
       const newCalc: CalculatorBox = {
-        id: `calc-${Date.now()}`,
+        id: calcId,
         x: Math.max(20, x - CALC_BASE_WIDTH / 2),
         y: Math.max(20, y - 100),
         scale: 1,
@@ -2313,6 +2817,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       };
       onAddCalculator(newCalc);
       setSelectedCalcId(newCalc.id);
+      if (e.pointerType === 'touch') {
+        const vp = zoomPanRef.current;
+        const now = Date.now();
+        recentTouchArtifactsRef.current = [
+          ...recentTouchArtifactsRef.current.filter((a) => now - a.createdAt < 1200),
+          {
+            kind: 'calc',
+            id: calcId,
+            pointerId: e.pointerId,
+            startedAt: now,
+            createdAt: now,
+            endedByCancel: false,
+            startZoom: vp.zoomScale,
+            startPovScale: povScaleRef.current,
+            startPanX: vp.panOffset.x,
+            startPanY: vp.panOffset.y,
+            endZoom: vp.zoomScale,
+            endPovScale: povScaleRef.current,
+            endPanX: vp.panOffset.x,
+            endPanY: vp.panOffset.y,
+          },
+        ];
+      }
       return;
     }
 
@@ -2474,6 +3001,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
       pendingLiveCanvasClearRef.current = false;
       clearLiveCanvas();
+      activeStrokeMetaRef.current = {
+        pointerId,
+        pointerType,
+        startedAt: strokeStartTimestampRef.current,
+        startZoom: zoomPanRef.current.zoomScale,
+        startPovScale: povScaleRef.current,
+        startPanX: zoomPanRef.current.panOffset.x,
+        startPanY: zoomPanRef.current.panOffset.y,
+        endedByCancel: false,
+      };
       isDrawingRef.current = true;
       currentPointsRef.current = initialPts;
       renderedPointCountRef.current = 0;
@@ -2526,6 +3063,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
   const appendCoalescedDrawingPoints = useCallback(
     (clientX: number, clientY: number, pressure: number, coalesced: PointerEvent[] | null) => {
+      const meta = activeStrokeMetaRef.current;
+      if (meta?.pointerType === 'touch') {
+        const vp = zoomPanRef.current;
+        const vpMoved =
+          Math.abs(vp.zoomScale - meta.startZoom) > 0.002 ||
+          Math.abs(povScaleRef.current - meta.startPovScale) > 0.002 ||
+          Math.hypot(vp.panOffset.x - meta.startPanX, vp.panOffset.y - meta.startPanY) > 1.5;
+        if (vpMoved || isPinchingRef.current || activeTouchCountRef.current >= 2) {
+          cleanupGuiltyTouchArtifacts('zoom_drift');
+          return;
+        }
+      }
       const pts = currentPointsRef.current;
       if (coalesced && coalesced.length > 0) {
         for (let i = 0; i < coalesced.length; i++) {
@@ -2539,7 +3088,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
       drawIncrementalLivePoints(pts, currentColor, strokeWidth);
     },
-    [getStageCoords, drawIncrementalLivePoints, currentColor, strokeWidth]
+    [getStageCoords, drawIncrementalLivePoints, currentColor, strokeWidth, cleanupGuiltyTouchArtifacts]
   );
 
   // Pointer Move (React fallback for non-inking modes; inking fast-path runs natively on interactionLayerRef)
@@ -2692,8 +3241,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           : null;
 
       if (!isDrawingRef.current) {
-        const isSmartTipContacting =
+        const touchNotPinching =
           e.pointerType === 'touch' &&
+          !isPinchingRef.current &&
+          activeTouchCountRef.current < 2 &&
+          !pinchSuppressedTouchPointerIdsRef.current.has(e.pointerId) &&
+          Date.now() - lastPinchEndedAtRef.current >= 260;
+        const isSmartTipContacting =
+          touchNotPinching &&
           (touchInputMode === 'two_finger' ||
             (stylusConfig?.detectionMode === 'smart_tip' &&
               activeSmartStylusPointerIdRef.current === e.pointerId));
@@ -3012,15 +3567,24 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (handledByNativeInkRef.current.has(e.nativeEvent)) {
       return;
     }
+    const pMeta = activePointerMetaRef.current.get(e.pointerId);
+    activePointerMetaRef.current.delete(e.pointerId);
     const accepted = isPointerAccepted(e, 'up');
     if (e.pointerType === 'pen') {
       contactingPenIdsRef.current.delete(e.pointerId);
       lastStylusEventAtRef.current = Date.now();
     }
+    const wasPinchSuppressed =
+      e.pointerType === 'touch' && pinchSuppressedTouchPointerIdsRef.current.has(e.pointerId);
+    if (e.pointerType === 'touch') {
+      activeTouchPointerIdsRef.current.delete(e.pointerId);
+      pinchSuppressedTouchPointerIdsRef.current.delete(e.pointerId);
+    }
     if (activeSmartStylusPointerIdRef.current === e.pointerId) {
       activeSmartStylusPointerIdRef.current = null;
     }
     rejectedSmartTouchIdsRef.current.delete(e.pointerId);
+    palmTouchPointerIdsRef.current.delete(e.pointerId);
     smartTouchCoordsRef.current.delete(e.pointerId);
     clearPointerGeometryCache(e.pointerId);
     if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
@@ -3050,7 +3614,53 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
-    if (isPinchingRef.current && e.pointerType !== 'pen') return;
+    if (
+      e.pointerType === 'touch' &&
+      (wasPinchSuppressed || isPinchingRef.current || activeTouchCountRef.current >= 2)
+    ) {
+      setShapeDragStart(null);
+      setShapeDragCurrent(null);
+      setGraphDragStart(null);
+      setGraphDragCurrent(null);
+      setDictateDragStart(null);
+      setDictateDragCurrent(null);
+      setAngleStep('idle');
+      setAngleCenter(null);
+      setEraserSelectStart(null);
+      setEraserSelectCurrent(null);
+      setLassoStart(null);
+      setLassoCurrent(null);
+      setPhotoCropStart(null);
+      setPhotoCropCurrent(null);
+      setPhotoCropClientStart(null);
+      setPhotoCropClientCurrent(null);
+      return;
+    }
+
+    const recordPlacedTouchArtifact = (kind: 'shape' | 'graph' | 'dictate', id: string) => {
+      if (e.pointerType !== 'touch') return;
+      const vp = zoomPanRef.current;
+      const now = Date.now();
+      recentTouchArtifactsRef.current = [
+        ...recentTouchArtifactsRef.current.filter((a) => now - a.createdAt < 1200),
+        {
+          kind,
+          id,
+          pointerId: e.pointerId,
+          startedAt: pMeta?.downAt ?? now,
+          createdAt: now,
+          endedByCancel: false,
+          startZoom: pMeta?.startZoom ?? vp.zoomScale,
+          startPovScale: pMeta?.startPovScale ?? povScaleRef.current,
+          startPanX: pMeta?.startPanX ?? vp.panOffset.x,
+          startPanY: pMeta?.startPanY ?? vp.panOffset.y,
+          endZoom: vp.zoomScale,
+          endPovScale: povScaleRef.current,
+          endPanX: vp.panOffset.x,
+          endPanY: vp.panOffset.y,
+        },
+      ];
+    };
 
     const { x, y } = getStageCoords(e.clientX, e.clientY);
 
@@ -3202,6 +3812,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       };
 
       onAddGraph(newGraph);
+      recordPlacedTouchArtifact('graph', newGraph.id);
       setSelectedGraphId(newGraph.id);
       setGraphDragStart(null);
       setGraphDragCurrent(null);
@@ -3267,6 +3878,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         };
 
         onAddShape(newShape);
+        recordPlacedTouchArtifact('shape', newShape.id);
         if (shapeType === 'grid') {
           setSelectedGridShapeId(newShape.id);
         }
@@ -3346,6 +3958,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           wrap: false,
           boxMode: 'height',
         });
+        recordPlacedTouchArtifact('dictate', id);
       } else if (dictateSubMode === 'dimensions') {
         const minX = Math.min(start.x, current.x);
         const minY = Math.min(start.y, current.y);
@@ -3367,6 +3980,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           wrap: true,
           boxMode: 'dimensions',
         });
+        recordPlacedTouchArtifact('dictate', id);
       } else {
         // constant_font: Horizontal line defines wrap width, top-bar box controls font size
         const fontSize = Math.max(10, Math.round(constantDictateFontSize));
@@ -3388,6 +4002,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           wrap: true,
           boxMode: 'constant_font',
         });
+        recordPlacedTouchArtifact('dictate', id);
       }
       return;
     }
@@ -3486,6 +4101,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (e.pointerType === 'pen') {
       contactingPenIdsRef.current.delete(e.pointerId);
     }
+    const wasPinchSuppressed =
+      e.pointerType === 'touch' &&
+      (isPinchingRef.current ||
+        activeTouchCountRef.current >= 2 ||
+        pinchSuppressedTouchPointerIdsRef.current.has(e.pointerId));
+    if (e.pointerType === 'touch') {
+      activeTouchPointerIdsRef.current.delete(e.pointerId);
+      pinchSuppressedTouchPointerIdsRef.current.delete(e.pointerId);
+    }
+    activePointerMetaRef.current.delete(e.pointerId);
     if (activeSmartStylusPointerIdRef.current === e.pointerId) {
       activeSmartStylusPointerIdRef.current = null;
     }
@@ -3512,12 +4137,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       );
       hasGhostedInCurrentGestureRef.current = false;
     }
-    // Preserve any real pen points already drawn before an OS interruption
-    if (mode === 'drawing' && isDrawingRef.current && currentPointsRef.current.length >= 1) {
+    // Preserve hardware pen points on interruption; abort touch strokes if pinching or mark cancel metadata
+    if (
+      mode === 'drawing' &&
+      isDrawingRef.current &&
+      currentPointsRef.current.length >= 1 &&
+      !(e.pointerType === 'touch' && wasPinchSuppressed)
+    ) {
+      if (e.pointerType === 'touch' && activeStrokeMetaRef.current) {
+        activeStrokeMetaRef.current.endedByCancel = true;
+      }
       commitActiveDrawingStrokeRef.current(e.pointerType === 'pen' ? e.pointerId : undefined);
     } else {
       isDrawingRef.current = false;
       currentPointsRef.current = [];
+      renderedPointCountRef.current = 0;
+      activeStrokeMetaRef.current = null;
       stopLiveStrokeStream();
       clearLiveCanvas();
     }
@@ -3547,6 +4182,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (e.pointerType === 'pen') {
       contactingPenIdsRef.current.delete(e.pointerId);
     }
+    const wasPinchSuppressed =
+      e.pointerType === 'touch' &&
+      (isPinchingRef.current ||
+        activeTouchCountRef.current >= 2 ||
+        pinchSuppressedTouchPointerIdsRef.current.has(e.pointerId));
     if (activeSmartStylusPointerIdRef.current === e.pointerId) {
       activeSmartStylusPointerIdRef.current = null;
     }
@@ -3561,6 +4201,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
     activePointerIdRef.current = null;
     if (mode === 'drawing' && isDrawingRef.current) {
+      if (e.pointerType === 'touch' && wasPinchSuppressed) {
+        isDrawingRef.current = false;
+        currentPointsRef.current = [];
+        renderedPointCountRef.current = 0;
+        activeStrokeMetaRef.current = null;
+        stopLiveStrokeStream();
+        clearLiveCanvas();
+        return;
+      }
+      if (e.pointerType === 'touch' && activeStrokeMetaRef.current) {
+        activeStrokeMetaRef.current.endedByCancel = true;
+      }
       commitActiveDrawingStrokeRef.current(e.pointerType === 'pen' ? e.pointerId : undefined);
     }
   };
@@ -3617,7 +4269,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         isPinchingRef.current = false;
       }
 
+      let hadOtherActiveTouch = false;
+      if (ev.pointerType === 'touch') {
+        if (!isPinchingRef.current && activeTouchCountRef.current < 2) {
+          pinchSuppressedTouchPointerIdsRef.current.delete(ev.pointerId);
+        }
+        hadOtherActiveTouch = Array.from(activeTouchPointerIdsRef.current).some(
+          (id) =>
+            id !== ev.pointerId &&
+            !(stylusConfig?.detectionMode === 'smart_tip' && palmTouchPointerIdsRef.current.has(id))
+        );
+        activeTouchPointerIdsRef.current.add(ev.pointerId);
+      }
+
       if (!isPointerAccepted(ev, 'down')) {
+        return;
+      }
+
+      if (
+        ev.pointerType === 'touch' &&
+        (isPinchingRef.current || activeTouchCountRef.current >= 2 || hadOtherActiveTouch) &&
+        (touchInputMode === 'two_finger' ||
+          (touchInputMode === 'two_finger_stylus' && stylusConfig?.detectionMode === 'smart_tip'))
+      ) {
         return;
       }
 
@@ -3705,8 +4379,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       // Synthetic Stroke Initiation (Missed Down-State Fallback):
       // Do NOT call setPointerCapture mid-move; track via window capture listeners so capture errors cannot abort the stroke.
       if (!isDrawingRef.current) {
-        const smartTipContacting =
+        const touchNotPinching =
           ev.pointerType === 'touch' &&
+          !isPinchingRef.current &&
+          activeTouchCountRef.current < 2 &&
+          !pinchSuppressedTouchPointerIdsRef.current.has(ev.pointerId) &&
+          Date.now() - lastPinchEndedAtRef.current >= 260;
+        const smartTipContacting =
+          touchNotPinching &&
           (touchInputMode === 'two_finger' ||
             (stylusConfig?.detectionMode === 'smart_tip' &&
               activeSmartStylusPointerIdRef.current === ev.pointerId));
@@ -3741,6 +4421,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       const layer = interactionLayerRef.current;
       if (!layer) return;
       if (handledByNativeInkRef.current.has(ev) || lastProcessedPointerMoveRef.current === ev) return;
+      if (
+        ev.pointerType === 'touch' &&
+        (isPinchingRef.current ||
+          activeTouchCountRef.current >= 2 ||
+          pinchSuppressedTouchPointerIdsRef.current.has(ev.pointerId) ||
+          Date.now() - lastPinchEndedAtRef.current < 260)
+      ) {
+        return;
+      }
       if (
         ev.pointerType !== 'pen' &&
         !(
@@ -3785,10 +4474,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         zeroContactMoveStreakRef.current.delete(ev.pointerId);
         lastStylusEventAtRef.current = Date.now();
       }
+      if (ev.pointerType === 'touch') {
+        activeTouchPointerIdsRef.current.delete(ev.pointerId);
+        pinchSuppressedTouchPointerIdsRef.current.delete(ev.pointerId);
+      }
       if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
         activeSmartStylusPointerIdRef.current = null;
       }
       rejectedSmartTouchIdsRef.current.delete(ev.pointerId);
+      palmTouchPointerIdsRef.current.delete(ev.pointerId);
       smartTouchCoordsRef.current.delete(ev.pointerId);
       clearPointerGeometryCache(ev.pointerId);
       if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
@@ -3844,6 +4538,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         contactingPenIdsRef.current.delete(ev.pointerId);
         zeroContactMoveStreakRef.current.delete(ev.pointerId);
       }
+      const wasPinchSuppressed =
+        ev.pointerType === 'touch' &&
+        (isPinchingRef.current ||
+          activeTouchCountRef.current >= 2 ||
+          pinchSuppressedTouchPointerIdsRef.current.has(ev.pointerId));
+      if (ev.pointerType === 'touch') {
+        activeTouchPointerIdsRef.current.delete(ev.pointerId);
+        pinchSuppressedTouchPointerIdsRef.current.delete(ev.pointerId);
+      }
       if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
         activeSmartStylusPointerIdRef.current = null;
       }
@@ -3873,11 +4576,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           // Ignore query error
         }
       }
-      if (isDrawingRef.current && currentPointsRef.current.length >= 1) {
+      if (
+        isDrawingRef.current &&
+        currentPointsRef.current.length >= 1 &&
+        !(ev.pointerType === 'touch' && wasPinchSuppressed)
+      ) {
+        if (ev.pointerType === 'touch' && activeStrokeMetaRef.current) {
+          activeStrokeMetaRef.current.endedByCancel = true;
+        }
         commitActiveDrawingStrokeRef.current(ev.pointerType === 'pen' ? ev.pointerId : undefined);
       } else {
         isDrawingRef.current = false;
         currentPointsRef.current = [];
+        renderedPointCountRef.current = 0;
+        activeStrokeMetaRef.current = null;
         stopLiveStrokeStream();
         clearLiveCanvas();
       }
@@ -3919,6 +4631,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         contactingPenIdsRef.current.delete(ev.pointerId);
         zeroContactMoveStreakRef.current.delete(ev.pointerId);
       }
+      const wasPinchSuppressed =
+        ev.pointerType === 'touch' &&
+        (isPinchingRef.current ||
+          activeTouchCountRef.current >= 2 ||
+          pinchSuppressedTouchPointerIdsRef.current.has(ev.pointerId));
       if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
         activeSmartStylusPointerIdRef.current = null;
       }
@@ -3934,6 +4651,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       handledByNativeInkRef.current.add(ev);
       activePointerIdRef.current = null;
       if (isDrawingRef.current) {
+        if (ev.pointerType === 'touch' && wasPinchSuppressed) {
+          isDrawingRef.current = false;
+          currentPointsRef.current = [];
+          renderedPointCountRef.current = 0;
+          activeStrokeMetaRef.current = null;
+          stopLiveStrokeStream();
+          clearLiveCanvas();
+          return;
+        }
+        if (ev.pointerType === 'touch' && activeStrokeMetaRef.current) {
+          activeStrokeMetaRef.current.endedByCancel = true;
+        }
         commitActiveDrawingStrokeRef.current(ev.pointerType === 'pen' ? ev.pointerId : undefined);
       }
     },
@@ -4048,8 +4777,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
-      const smartTipContacting =
+      const touchNotPinching =
         ev.pointerType === 'touch' &&
+        !isPinchingRef.current &&
+        activeTouchCountRef.current < 2 &&
+        !pinchSuppressedTouchPointerIdsRef.current.has(ev.pointerId) &&
+        Date.now() - lastPinchEndedAtRef.current >= 260;
+      const smartTipContacting =
+        touchNotPinching &&
         (touchInputMode === 'two_finger' ||
           (stylusConfig?.detectionMode === 'smart_tip' &&
             activeSmartStylusPointerIdRef.current === ev.pointerId));
@@ -4111,6 +4846,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         zeroContactMoveStreakRef.current.delete(ev.pointerId);
         lastStylusEventAtRef.current = Date.now();
       }
+      if (ev.pointerType === 'touch') {
+        activeTouchPointerIdsRef.current.delete(ev.pointerId);
+        pinchSuppressedTouchPointerIdsRef.current.delete(ev.pointerId);
+      }
+      if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
+        activeSmartStylusPointerIdRef.current = null;
+      }
       if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
         isStylusDownRef.current = false;
       }
@@ -4143,17 +4885,38 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         contactingPenIdsRef.current.delete(ev.pointerId);
         zeroContactMoveStreakRef.current.delete(ev.pointerId);
       }
+      const wasPinchSuppressed =
+        ev.pointerType === 'touch' &&
+        (isPinchingRef.current ||
+          activeTouchCountRef.current >= 2 ||
+          pinchSuppressedTouchPointerIdsRef.current.has(ev.pointerId));
+      if (ev.pointerType === 'touch') {
+        activeTouchPointerIdsRef.current.delete(ev.pointerId);
+        pinchSuppressedTouchPointerIdsRef.current.delete(ev.pointerId);
+      }
+      if (activeSmartStylusPointerIdRef.current === ev.pointerId) {
+        activeSmartStylusPointerIdRef.current = null;
+      }
       if (contactingPenIdsRef.current.size === 0 && activeSmartStylusPointerIdRef.current === null) {
         isStylusDownRef.current = false;
       }
       handledByNativeInkRef.current.add(ev);
       activeRecoveryWindowPointerIdRef.current = null;
       activePointerIdRef.current = null;
-      if (isDrawingRef.current && currentPointsRef.current.length >= 1) {
+      if (
+        isDrawingRef.current &&
+        currentPointsRef.current.length >= 1 &&
+        !(ev.pointerType === 'touch' && wasPinchSuppressed)
+      ) {
+        if (ev.pointerType === 'touch' && activeStrokeMetaRef.current) {
+          activeStrokeMetaRef.current.endedByCancel = true;
+        }
         commitActiveDrawingStrokeRef.current(ev.pointerType === 'pen' ? ev.pointerId : undefined);
       } else {
         isDrawingRef.current = false;
         currentPointsRef.current = [];
+        renderedPointCountRef.current = 0;
+        activeStrokeMetaRef.current = null;
         stopLiveStrokeStream();
         clearLiveCanvas();
       }

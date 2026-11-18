@@ -801,15 +801,20 @@ export default function App() {
       const list = Array.from(touches).filter(
         (t) => (t as Touch & { touchType?: string }).touchType !== 'stylus'
       );
-      if (touchInputMode === 'two_finger_stylus') {
-        if (stylusConfig.detectionMode === 'smart_tip') {
-          const maxTip = stylusConfig.maxTipSizePx ?? 14;
+      if (touchInputMode === 'two_finger_stylus' && stylusConfig.detectionMode === 'smart_tip') {
+        const maxTip = stylusConfig.maxTipSizePx ?? 14;
+        const palmThreshold = Math.max(48, maxTip * 2.8);
+        const hasPalm = list.some(
+          (t) => Math.max(t.radiusX || 0, t.radiusY || 0) * 2 >= palmThreshold
+        );
+        const hasStylusTip = list.some((t) => {
+          const d = Math.max(t.radiusX || 0, t.radiusY || 0) * 2;
+          return d > 3 && d <= maxTip;
+        });
+        if (hasPalm && hasStylusTip) {
           return list.filter((t) => {
-            const rx = t.radiusX || 0;
-            const ry = t.radiusY || 0;
-            const maxR = Math.max(rx, ry);
-            // Ignore placeholder <= 1.5px radii when identifying fingers vs passive tip
-            return !(maxR > 1.5 && maxR * 2 <= maxTip);
+            const d = Math.max(t.radiusX || 0, t.radiusY || 0) * 2;
+            return !(d > 3 && d <= maxTip);
           });
         }
       }
@@ -2154,6 +2159,101 @@ export default function App() {
     saveSnapshot();
     setCalculators((prev) => prev.filter((c) => c.id !== id));
   };
+
+  // Guilty-until-proven-innocent rollback for provisional touch artifacts when a 2-finger pinch-to-zoom engages
+  const handleDiscardTouchArtifacts = useCallback(
+    (artifacts: {
+      strokeIds?: string[];
+      shapeIds?: string[];
+      graphIds?: string[];
+      calcIds?: string[];
+      imageIds?: string[];
+      dictateIds?: string[];
+    }) => {
+      const sSet = new Set(artifacts.strokeIds || []);
+      const shSet = new Set(artifacts.shapeIds || []);
+      const gSet = new Set(artifacts.graphIds || []);
+      const cSet = new Set(artifacts.calcIds || []);
+      const imgSet = new Set(artifacts.imageIds || []);
+      const dSet = new Set(artifacts.dictateIds || []);
+      if (
+        sSet.size === 0 &&
+        shSet.size === 0 &&
+        gSet.size === 0 &&
+        cSet.size === 0 &&
+        imgSet.size === 0 &&
+        dSet.size === 0
+      ) {
+        return;
+      }
+
+      const cur = latestSyncStateRef.current;
+      const remStrokes = sSet.size > 0 ? cur.strokes.filter((s) => !sSet.has(s.id)) : cur.strokes;
+      const remShapes = shSet.size > 0 ? cur.shapes.filter((sh) => !shSet.has(sh.id)) : cur.shapes;
+      const remGraphs = gSet.size > 0 ? cur.graphs.filter((g) => !gSet.has(g.id)) : cur.graphs;
+      const remCalcs =
+        cSet.size > 0 ? cur.calculators.filter((c) => !cSet.has(c.id)) : cur.calculators;
+      const remImages = imgSet.size > 0 ? cur.images.filter((img) => !imgSet.has(img.id)) : cur.images;
+      const remDictates =
+        dSet.size > 0
+          ? cur.dictatedTextBoxes.filter((b) => !dSet.has(b.id))
+          : cur.dictatedTextBoxes;
+
+      if (sSet.size > 0) setStrokes((prev) => prev.filter((s) => !sSet.has(s.id)));
+      if (shSet.size > 0) setShapes((prev) => prev.filter((sh) => !shSet.has(sh.id)));
+      if (gSet.size > 0) setGraphs((prev) => prev.filter((g) => !gSet.has(g.id)));
+      if (cSet.size > 0) setCalculators((prev) => prev.filter((c) => !cSet.has(c.id)));
+      if (imgSet.size > 0) setImages((prev) => prev.filter((img) => !imgSet.has(img.id)));
+      if (dSet.size > 0) {
+        setDictatedTextBoxes((prev) => prev.filter((b) => !dSet.has(b.id)));
+        if (activeDictateBoxId && dSet.has(activeDictateBoxId)) {
+          stopDictation();
+          setActiveDictateBoxId(null);
+        }
+        if (selectedDictateBoxId && dSet.has(selectedDictateBoxId)) {
+          setSelectedDictateBoxId(null);
+        }
+        if (editingDictateBoxId && dSet.has(editingDictateBoxId)) {
+          setEditingDictateBoxId(null);
+        }
+      }
+
+      // Clean the discarded artifacts and redundant top snapshots out of undo history
+      setHistoryStack((prev) => {
+        if (prev.length === 0) return prev;
+        const cleaned = prev.map((snap) => ({
+          ...snap,
+          strokes: sSet.size > 0 ? snap.strokes.filter((s) => !sSet.has(s.id)) : snap.strokes,
+          shapes: shSet.size > 0 ? snap.shapes.filter((sh) => !shSet.has(sh.id)) : snap.shapes,
+          graphs: gSet.size > 0 ? snap.graphs.filter((g) => !gSet.has(g.id)) : snap.graphs,
+          calculators:
+            cSet.size > 0 ? snap.calculators.filter((c) => !cSet.has(c.id)) : snap.calculators,
+          images:
+            imgSet.size > 0
+              ? (snap.images || []).filter((img) => !imgSet.has(img.id))
+              : snap.images,
+          dictatedTextBoxes:
+            dSet.size > 0
+              ? (snap.dictatedTextBoxes || []).filter((b) => !dSet.has(b.id))
+              : snap.dictatedTextBoxes,
+        }));
+        while (cleaned.length > 0) {
+          const top = cleaned[cleaned.length - 1];
+          const sameState =
+            top.strokes.length === remStrokes.length &&
+            top.shapes.length === remShapes.length &&
+            top.graphs.length === remGraphs.length &&
+            top.calculators.length === remCalcs.length &&
+            (top.images?.length ?? 0) === remImages.length &&
+            (top.dictatedTextBoxes?.length ?? 0) === remDictates.length;
+          if (!sameState) break;
+          cleaned.pop();
+        }
+        return cleaned;
+      });
+    },
+    [activeDictateBoxId, selectedDictateBoxId, editingDictateBoxId, stopDictation]
+  );
 
   const handleSelectionChange = useCallback(
     (sel: {
@@ -4233,6 +4333,7 @@ export default function App() {
                 onTransformItems={handleTransformItems}
                 onRotateItems={handleRotateItems}
                 onTransformEnd={saveSnapshot}
+                onDiscardTouchArtifacts={handleDiscardTouchArtifacts}
                 onColorUsed={handleColorUsed}
               />
             );

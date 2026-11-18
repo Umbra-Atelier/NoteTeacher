@@ -156,6 +156,14 @@ interface VirtualizedPageSlotProps {
     dictateIds?: string[]
   ) => void;
   onTransformEnd: () => void;
+  onDiscardTouchArtifacts?: (artifacts: {
+    strokeIds?: string[];
+    shapeIds?: string[];
+    graphIds?: string[];
+    calcIds?: string[];
+    imageIds?: string[];
+    dictateIds?: string[];
+  }) => void;
   onColorUsed: (hex: string) => void;
 }
 
@@ -246,6 +254,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   onTransformItems,
   onRotateItems,
   onTransformEnd,
+  onDiscardTouchArtifacts,
   onColorUsed,
 }) => {
   const pageAspect =
@@ -631,6 +640,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
             onTransformItems={onTransformItems}
             onRotateItems={onRotateItems}
             onTransformEnd={onTransformEnd}
+            onDiscardTouchArtifacts={onDiscardTouchArtifacts}
             onColorUsed={onColorUsed}
           />
         </div>
