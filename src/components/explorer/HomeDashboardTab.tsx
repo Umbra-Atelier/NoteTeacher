@@ -155,8 +155,10 @@ export const HomeDashboardTab: React.FC<HomeDashboardTabProps> = ({
                     <div className="text-xs font-semibold text-slate-800 dark:text-slate-200 group-hover:text-blue-600 truncate">
                       {tab.name}
                     </div>
-                    <div className="text-[10px] text-slate-400 truncate">
-                      {tab.files.length} document{tab.files.length === 1 ? '' : 's'}
+                    <div className="text-[10px] text-slate-400 truncate font-mono" title={tab.pathBreadcrumb}>
+                      {tab.isSingleFileTab || tab.iconType === 'file'
+                        ? tab.pathBreadcrumb
+                        : `${tab.files.length} document${tab.files.length === 1 ? '' : 's'}`}
                     </div>
                   </div>
                 </div>

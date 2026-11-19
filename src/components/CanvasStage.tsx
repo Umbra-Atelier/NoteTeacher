@@ -336,7 +336,12 @@ const PDF_TILE_ROWS = 4;
 export const CanvasStage: React.FC<CanvasStageProps> = ({
   mode,
   touchInputMode = 'two_finger',
-  stylusConfig = { detectionMode: 'active_pen', maxTipSizePx: 14, allowMouseInput: true },
+  stylusConfig = {
+    detectionMode: 'active_pen',
+    maxTipSizePx: 14,
+    allowMouseInput: true,
+    minPenPressure: 0,
+  },
   isAudienceViewer = false,
   isActivePage = true,
   isVisibleInViewport = true,
@@ -796,6 +801,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const zeroContactMoveStreakRef = useRef<Map<number, number>>(new Map());
   const strokeStartTimestampRef = useRef<number>(0);
   const pendingUpLostCaptureCountRef = useRef<Map<number, { count: number; at: number }>>(new Map());
+  const layerCapturedPointerIdsRef = useRef<Set<number>>(new Set());
   const activeStrokeSessionRef = useRef<number>(0);
   const lastStylusEventAtRef = useRef<number>(0);
   const lastProcessedPointerMoveRef = useRef<Event | null>(null);
@@ -808,6 +814,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const activePointerIdRef = useRef<number | null>(null);
   const isDrawingRef = useRef<boolean>(false);
   const currentPointsRef = useRef<StrokePoint[]>([]);
+  const strokeReachedMinPressureRef = useRef<boolean>(false);
+  const pendingPenTailPointsRef = useRef<StrokePoint[]>([]);
   const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderedPointCountRef = useRef<number>(0);
   const pendingLiveCanvasClearRef = useRef<boolean>(false);
@@ -815,6 +823,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const lastCommittedBridgeRef = useRef<{ pointerId: number; point: StrokePoint; time: number } | null>(null);
 
   // Guilty-until-proven-innocent tracking for non-pen touch inputs before/during 2-finger pinch-to-zoom
+  const stylusConfigRef = useRef<StylusDetectionConfig>(stylusConfig);
+  stylusConfigRef.current = stylusConfig;
   const povScaleRef = useRef<number>(povScale);
   povScaleRef.current = povScale;
   const onDiscardTouchArtifactsRef = useRef(onDiscardTouchArtifacts);
@@ -1190,6 +1200,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
     isDrawingRef.current = false;
     currentPointsRef.current = [];
+    strokeReachedMinPressureRef.current = false;
+    pendingPenTailPointsRef.current = [];
     renderedPointCountRef.current = 0;
     pendingLiveCanvasClearRef.current = false;
     lastCommittedBridgeRef.current = null;
@@ -1201,6 +1213,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     confirmedDownPenIdsRef.current.clear();
     zeroContactMoveStreakRef.current.clear();
     pendingUpLostCaptureCountRef.current.clear();
+    layerCapturedPointerIdsRef.current.clear();
     activeSmartStylusPointerIdRef.current = null;
     setShapeDragStart(null);
     setShapeDragCurrent(null);
@@ -1241,6 +1254,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     activeStrokeMetaRef.current = null;
     isDrawingRef.current = false;
     currentPointsRef.current = [];
+    strokeReachedMinPressureRef.current = false;
+    pendingPenTailPointsRef.current = [];
     renderedPointCountRef.current = 0;
 
     if (preserveBridgeForPointerId !== undefined && pts.length > 0) {
@@ -2482,18 +2497,40 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const trySetPointerCapture = (target: HTMLElement, pointerId: number) => {
     try {
       target.setPointerCapture(pointerId);
+      layerCapturedPointerIdsRef.current.add(pointerId);
     } catch {
       // Ignore if pointer already inactive or capture unsupported
     }
   };
 
   const tryReleasePointerCapture = (target: HTMLElement, pointerId: number) => {
+    layerCapturedPointerIdsRef.current.delete(pointerId);
     try {
       if (target.hasPointerCapture(pointerId)) {
         target.releasePointerCapture(pointerId);
       }
     } catch {
       // Ignore release errors
+    }
+  };
+
+  const recordExpectedUpLostCapture = (layerEl: HTMLElement | null, pointerId: number) => {
+    let wasCaptured = layerCapturedPointerIdsRef.current.delete(pointerId);
+    if (!wasCaptured && layerEl) {
+      try {
+        wasCaptured = layerEl.hasPointerCapture(pointerId);
+      } catch {
+        wasCaptured = false;
+      }
+    }
+    if (wasCaptured) {
+      const now = Date.now();
+      const prev = pendingUpLostCaptureCountRef.current.get(pointerId);
+      const activeCount = prev && now - prev.at < 1000 ? prev.count : 0;
+      pendingUpLostCaptureCountRef.current.set(pointerId, {
+        count: activeCount + 1,
+        at: now,
+      });
     }
   };
 
@@ -2507,15 +2544,32 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       trackMoveStreak = false
     ): boolean => {
       if (ev.pointerType !== 'pen') return false;
+      const minCutoff =
+        stylusConfigRef.current?.detectionMode === 'active_pen'
+          ? stylusConfigRef.current?.minPenPressure ?? 0
+          : 0;
+      const hasButtonsContact = (ev.buttons & 1) !== 0 || (ev.buttons & 32) !== 0;
+      // When buttons are already released mid-lift and pressure dropped into the calibrated hover tail below cutoff, stop extending the stroke
+      const isReleasedLiftTail =
+        minCutoff > 0 &&
+        strokeReachedMinPressureRef.current &&
+        !hasButtonsContact &&
+        (ev.pressure ?? 0) < minCutoff;
+
       let hasPositiveSignal =
-        (ev.buttons & 1) !== 0 || ev.pressure > 0 || (ev.tangentialPressure ?? 0) > 0;
-      if (!hasPositiveSignal && typeof ev.getCoalescedEvents === 'function') {
+        !isReleasedLiftTail &&
+        (hasButtonsContact || (ev.pressure ?? 0) > 0 || (ev.tangentialPressure ?? 0) > 0);
+      if (!hasPositiveSignal && !isReleasedLiftTail && typeof ev.getCoalescedEvents === 'function') {
         try {
           const coalesced = ev.getCoalescedEvents();
           if (
             coalesced &&
             coalesced.some(
-              (ce) => (ce.buttons & 1) !== 0 || ce.pressure > 0 || (ce.tangentialPressure ?? 0) > 0
+              (ce) =>
+                (ce.buttons & 1) !== 0 ||
+                (ce.buttons & 32) !== 0 ||
+                (ce.pressure ?? 0) > 0 ||
+                (ce.tangentialPressure ?? 0) > 0
             )
           ) {
             hasPositiveSignal = true;
@@ -2534,10 +2588,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       // On iPadOS Apple Pencil & WebKit, rapid touch-down or transient move frames inside a confirmed
       // pointerdown->pointerup window can temporarily report pressure===0 & buttons===0 while on the glass.
       if (confirmedDownPenIdsRef.current.has(ev.pointerId)) {
-        if (!trackMoveStreak) return true;
+        if (!trackMoveStreak) return !isReleasedLiftTail;
         const elapsed = Date.now() - strokeStartTimestampRef.current;
         const nextStreak = (zeroContactMoveStreakRef.current.get(ev.pointerId) || 0) + 1;
         zeroContactMoveStreakRef.current.set(ev.pointerId, nextStreak);
+        if (isReleasedLiftTail) {
+          return nextStreak < 2;
+        }
         if (!strokeSawPositiveContactRef.current || elapsed < 140 || nextStreak < 4) {
           return true;
         }
@@ -2755,7 +2812,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     activePointerIdRef.current = e.pointerId;
 
     const { x, y } = getStageCoords(e.clientX, e.clientY);
-    const pressure = e.pressure || 0.5;
+    const pressure = e.pressure ?? 0;
 
     // PICTURE COPY: Click to place snippet
     if (pendingPhotoSnippet) {
@@ -2936,7 +2993,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       pointerType: string,
       clientX: number,
       clientY: number,
-      pressure: number,
+      rawPressure: number,
       coalesced: PointerEvent[] | null,
       captureTarget: HTMLElement | null,
       markWindowRecovery: boolean
@@ -2944,6 +3001,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (pointerType === 'pen') {
         confirmedDownPenIdsRef.current.add(pointerId);
         contactingPenIdsRef.current.add(pointerId);
+        rejectedSmartTouchIdsRef.current.delete(pointerId);
+        palmTouchPointerIdsRef.current.delete(pointerId);
+        pinchSuppressedTouchPointerIdsRef.current.delete(pointerId);
         zeroContactMoveStreakRef.current.set(pointerId, 0);
         lastStylusEventAtRef.current = Date.now();
         isStylusDownRef.current = true;
@@ -2957,8 +3017,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
       activeStrokeSessionRef.current += 1;
       strokeStartTimestampRef.current = Date.now();
-      strokeSawPositiveContactRef.current = pressure > 0;
+      strokeSawPositiveContactRef.current = rawPressure > 0;
       lastProcessedPointerMoveRef.current = null;
+
+      const minCutoff =
+        pointerType === 'pen' && stylusConfigRef.current?.detectionMode === 'active_pen'
+          ? stylusConfigRef.current?.minPenPressure ?? 0
+          : 0;
+      pendingPenTailPointsRef.current = [];
+      let reachedMin = pointerType !== 'pen' || minCutoff <= 0;
 
       if (captureTarget) {
         trySetPointerCapture(captureTarget, pointerId);
@@ -2978,13 +3045,35 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         onStopManualEditDictateBox?.();
       }
 
-      const initialPts: StrokePoint[] =
-        coalesced && coalesced.length > 0
-          ? coalesced.map((ce) => {
-              const c = getStageCoords(ce.clientX, ce.clientY);
-              return { x: c.x, y: c.y, pressure: ce.pressure || pressure };
-            })
-          : [{ ...getStageCoords(clientX, clientY), pressure }];
+      // Always keep at least the initial contact point(s) so quick light pen taps NEVER drop
+      const initialPts: StrokePoint[] = [];
+      if (coalesced && coalesced.length > 0) {
+        for (let i = 0; i < coalesced.length; i++) {
+          const ce = coalesced[i];
+          const c = getStageCoords(ce.clientX, ce.clientY);
+          const pVal = ce.pressure ?? rawPressure;
+          if (pointerType === 'pen' && minCutoff > 0 && pVal >= minCutoff) {
+            reachedMin = true;
+          }
+          const pt: StrokePoint = { x: c.x, y: c.y, pressure: pVal > 0 ? pVal : 0.5 };
+          if (pointerType === 'pen' && minCutoff > 0 && reachedMin && pVal < minCutoff && initialPts.length >= 1) {
+            pendingPenTailPointsRef.current.push(pt);
+          } else {
+            if (pendingPenTailPointsRef.current.length > 0) {
+              initialPts.push(...pendingPenTailPointsRef.current);
+              pendingPenTailPointsRef.current = [];
+            }
+            initialPts.push(pt);
+          }
+        }
+      } else {
+        const ptStage = getStageCoords(clientX, clientY);
+        if (pointerType === 'pen' && minCutoff > 0 && rawPressure >= minCutoff) {
+          reachedMin = true;
+        }
+        initialPts.push({ x: ptStage.x, y: ptStage.y, pressure: rawPressure > 0 ? rawPressure : 0.5 });
+      }
+      strokeReachedMinPressureRef.current = reachedMin;
 
       // If OS palm arbitration dropped capture mid-word within 140ms and we recovered the same pen pointer, bridge seamlessly
       const bridge = lastCommittedBridgeRef.current;
@@ -3062,7 +3151,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   );
 
   const appendCoalescedDrawingPoints = useCallback(
-    (clientX: number, clientY: number, pressure: number, coalesced: PointerEvent[] | null) => {
+    (clientX: number, clientY: number, rawPressure: number, coalesced: PointerEvent[] | null) => {
       const meta = activeStrokeMetaRef.current;
       if (meta?.pointerType === 'touch') {
         const vp = zoomPanRef.current;
@@ -3076,17 +3165,48 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         }
       }
       const pts = currentPointsRef.current;
+      const isActivePenFilter =
+        meta?.pointerType === 'pen' &&
+        stylusConfigRef.current?.detectionMode === 'active_pen' &&
+        (stylusConfigRef.current?.minPenPressure ?? 0) > 0;
+      const minCutoff = isActivePenFilter ? stylusConfigRef.current?.minPenPressure ?? 0 : 0;
+
+      const pushFilteredPoint = (px: number, py: number, pRaw: number) => {
+        const pt: StrokePoint = { x: px, y: py, pressure: pRaw > 0 ? pRaw : 0.5 };
+        if (!isActivePenFilter) {
+          pts.push(pt);
+          return;
+        }
+        if (pRaw >= minCutoff) {
+          strokeReachedMinPressureRef.current = true;
+          if (pendingPenTailPointsRef.current.length > 0) {
+            pts.push(...pendingPenTailPointsRef.current);
+            pendingPenTailPointsRef.current = [];
+          }
+          pts.push(pt);
+        } else if (!strokeReachedMinPressureRef.current) {
+          // Stroke has not yet reached cutoff pressure (quick light tap or pressureless pen) -> never drop
+          pts.push(pt);
+        } else {
+          // Buffer low-pressure lift tail; flushed if pen presses back down, or trimmed away cleanly on lift
+          pendingPenTailPointsRef.current.push(pt);
+        }
+      };
+
+      const prevCount = pts.length;
       if (coalesced && coalesced.length > 0) {
         for (let i = 0; i < coalesced.length; i++) {
           const ce = coalesced[i];
           const c = getStageCoords(ce.clientX, ce.clientY);
-          pts.push({ x: c.x, y: c.y, pressure: ce.pressure || pressure });
+          pushFilteredPoint(c.x, c.y, ce.pressure ?? rawPressure);
         }
       } else {
         const pt = getStageCoords(clientX, clientY);
-        pts.push({ x: pt.x, y: pt.y, pressure });
+        pushFilteredPoint(pt.x, pt.y, rawPressure);
       }
-      drawIncrementalLivePoints(pts, currentColor, strokeWidth);
+      if (pts.length > prevCount) {
+        drawIncrementalLivePoints(pts, currentColor, strokeWidth);
+      }
     },
     [getStageCoords, drawIncrementalLivePoints, currentColor, strokeWidth, cleanupGuiltyTouchArtifacts]
   );
@@ -3199,7 +3319,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
 
     const { x, y } = getStageCoords(e.clientX, e.clientY);
-    const pressure = e.pressure || 0.5;
+    const pressure = e.pressure ?? 0;
 
     if (isCircleEraseActive) {
       setEraserCirclePos({ x, y });
@@ -3762,9 +3882,19 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (mode === 'drawing') {
       if (isDrawingRef.current) {
         const pts = currentPointsRef.current;
+        const rawUpPressure = e.pressure ?? 0;
+        const minCutoff =
+          e.pointerType === 'pen' && stylusConfigRef.current?.detectionMode === 'active_pen'
+            ? stylusConfigRef.current?.minPenPressure ?? 0
+            : 0;
+        const shouldSuppressUpTail =
+          e.pointerType === 'pen' &&
+          minCutoff > 0 &&
+          strokeReachedMinPressureRef.current &&
+          rawUpPressure < minCutoff;
         const lastPt = pts[pts.length - 1];
-        if (!lastPt || Math.hypot(x - lastPt.x, y - lastPt.y) > 0.25) {
-          pts.push({ x, y, pressure: e.pressure || 0.5 });
+        if (!shouldSuppressUpTail && (!lastPt || Math.hypot(x - lastPt.x, y - lastPt.y) > 0.25)) {
+          pts.push({ x, y, pressure: rawUpPressure > 0 ? rawUpPressure : 0.5 });
           drawIncrementalLivePoints(pts, currentColor, strokeWidth);
         }
         commitActiveDrawingStrokeRef.current();
@@ -4317,7 +4447,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         ev.pointerType,
         ev.clientX,
         ev.clientY,
-        ev.pressure || 0.5,
+        ev.pressure ?? 0,
         coalesced,
         layer,
         false
@@ -4374,7 +4504,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         typeof (ev as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] }).getCoalescedEvents === 'function'
           ? (ev as PointerEvent & { getCoalescedEvents: () => PointerEvent[] }).getCoalescedEvents()
           : null;
-      const pressure = ev.pressure || 0.5;
+      const pressure = ev.pressure ?? 0;
 
       // Synthetic Stroke Initiation (Missed Down-State Fallback):
       // Do NOT call setPointerCapture mid-move; track via window capture listeners so capture errors cannot abort the stroke.
@@ -4417,7 +4547,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
     // Hardware-rate raw update wakes up missed-down starts immediately before frame coalescing
     onRawUpdate: (ev: PointerEvent) => {
-      if (!isInkingFastPathEnabled || isDrawingRef.current) return;
+      if (!isInkingFastPathEnabled) return;
+      if (isDrawingRef.current && (ev.pointerType !== 'pen' || activePointerIdRef.current === ev.pointerId)) {
+        return;
+      }
       const layer = interactionLayerRef.current;
       if (!layer) return;
       if (handledByNativeInkRef.current.has(ev) || lastProcessedPointerMoveRef.current === ev) return;
@@ -4455,7 +4588,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         ev.pointerType,
         ev.clientX,
         ev.clientY,
-        ev.pressure || 0.5,
+        ev.pressure ?? 0,
         null,
         null,
         true
@@ -4499,30 +4632,24 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
       handledByNativeInkRef.current.add(ev);
       activePointerIdRef.current = null;
-      // Browser auto-releases capture on pointerup; remember expected queued lostpointercapture so
-      // rapid subsequent down reusing the same Apple Pencil pointerId is never canceled by it.
-      if (layer) {
-        try {
-          if (layer.hasPointerCapture(ev.pointerId)) {
-            const now = Date.now();
-            const prev = pendingUpLostCaptureCountRef.current.get(ev.pointerId);
-            const activeCount = prev && now - prev.at < 150 ? prev.count : 0;
-            pendingUpLostCaptureCountRef.current.set(ev.pointerId, {
-              count: activeCount + 1,
-              at: now,
-            });
-          }
-        } catch {
-          // Ignore query error
-        }
-      }
+      recordExpectedUpLostCapture(layer, ev.pointerId);
 
       if (isDrawingRef.current) {
         const pt = getStageCoords(ev.clientX, ev.clientY);
         const pts = currentPointsRef.current;
+        const rawUpPressure = ev.pressure ?? 0;
+        const minCutoff =
+          ev.pointerType === 'pen' && stylusConfigRef.current?.detectionMode === 'active_pen'
+            ? stylusConfigRef.current?.minPenPressure ?? 0
+            : 0;
+        const shouldSuppressUpTail =
+          ev.pointerType === 'pen' &&
+          minCutoff > 0 &&
+          strokeReachedMinPressureRef.current &&
+          rawUpPressure < minCutoff;
         const lastPt = pts[pts.length - 1];
-        if (!lastPt || Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) > 0.25) {
-          pts.push({ x: pt.x, y: pt.y, pressure: ev.pressure || 0.5 });
+        if (!shouldSuppressUpTail && (!lastPt || Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) > 0.25)) {
+          pts.push({ x: pt.x, y: pt.y, pressure: rawUpPressure > 0 ? rawUpPressure : 0.5 });
           drawIncrementalLivePoints(pts, currentColor, strokeWidth);
         }
         commitActiveDrawingStrokeRef.current();
@@ -4561,21 +4688,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
       handledByNativeInkRef.current.add(ev);
       activePointerIdRef.current = null;
-      if (layer) {
-        try {
-          if (layer.hasPointerCapture(ev.pointerId)) {
-            const now = Date.now();
-            const prev = pendingUpLostCaptureCountRef.current.get(ev.pointerId);
-            const activeCount = prev && now - prev.at < 150 ? prev.count : 0;
-            pendingUpLostCaptureCountRef.current.set(ev.pointerId, {
-              count: activeCount + 1,
-              at: now,
-            });
-          }
-        } catch {
-          // Ignore query error
-        }
-      }
+      recordExpectedUpLostCapture(layer, ev.pointerId);
       if (
         isDrawingRef.current &&
         currentPointsRef.current.length >= 1 &&
@@ -4588,6 +4701,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       } else {
         isDrawingRef.current = false;
         currentPointsRef.current = [];
+        strokeReachedMinPressureRef.current = false;
+        pendingPenTailPointsRef.current = [];
         renderedPointCountRef.current = 0;
         activeStrokeMetaRef.current = null;
         stopLiveStrokeStream();
@@ -4597,9 +4712,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
     onLostCapture: (ev: PointerEvent) => {
       if (!isInkingFastPathEnabled && !isDrawingRef.current) return;
+      const layer = interactionLayerRef.current;
       const queuedEntry = pendingUpLostCaptureCountRef.current.get(ev.pointerId);
       const queuedUpCaptures =
-        queuedEntry && Date.now() - queuedEntry.at < 150 ? queuedEntry.count : 0;
+        queuedEntry && Date.now() - queuedEntry.at < 1000 ? queuedEntry.count : 0;
       if (queuedUpCaptures > 0) {
         if (queuedUpCaptures === 1) {
           pendingUpLostCaptureCountRef.current.delete(ev.pointerId);
@@ -4613,13 +4729,24 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         return;
       }
 
-      // If hardware pen is still physically down on glass when OS drops element capture mid-stroke,
-      // seamlessly hand off tracking to window listeners instead of killing the stroke!
+      // If a brand-new stroke already re-captured this pointerId (rapid zigzag taps!), ignore stale capture loss
+      if (layer) {
+        try {
+          if (layer.hasPointerCapture(ev.pointerId)) {
+            handledByNativeInkRef.current.add(ev);
+            return;
+          }
+        } catch {
+          // Ignore capture query errors
+        }
+      }
+
+      // Never allow lostpointercapture to abort/truncate an active hardware pen stroke —
+      // seamlessly hand off tracking to window listeners until real pointerup / pointercancel / hover!
       if (
         ev.pointerType === 'pen' &&
         isDrawingRef.current &&
-        ev.pointerId === activePointerIdRef.current &&
-        (confirmedDownPenIdsRef.current.has(ev.pointerId) || isPenEventContacting(ev, false))
+        ev.pointerId === activePointerIdRef.current
       ) {
         activeRecoveryWindowPointerIdRef.current = ev.pointerId;
         handledByNativeInkRef.current.add(ev);
@@ -4654,6 +4781,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         if (ev.pointerType === 'touch' && wasPinchSuppressed) {
           isDrawingRef.current = false;
           currentPointsRef.current = [];
+          strokeReachedMinPressureRef.current = false;
+          pendingPenTailPointsRef.current = [];
           renderedPointCountRef.current = 0;
           activeStrokeMetaRef.current = null;
           stopLiveStrokeStream();
@@ -4710,7 +4839,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         ev.pointerType,
         ev.clientX,
         ev.clientY,
-        ev.pressure || 0.5,
+        ev.pressure ?? 0,
         coalesced,
         ev.target === layer ? layer : null,
         ev.target !== layer
@@ -4726,7 +4855,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (!layer) return;
 
       const isTrackedRecovery = activeRecoveryWindowPointerIdRef.current === ev.pointerId;
-      if (!isTrackedRecovery && ev.target === layer) {
+      // Allow window capture phase to recover missed starts even when ev.target === layer if not yet drawing
+      const canRecoverMissedPen =
+        ev.pointerType === 'pen' &&
+        (!isDrawingRef.current ||
+          (activePointerIdRef.current !== null && activePointerIdRef.current !== ev.pointerId));
+      if (!isTrackedRecovery && !canRecoverMissedPen && ev.target === layer) {
         return;
       }
 
@@ -4771,6 +4905,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         contactingPenIdsRef.current.add(ev.pointerId);
         isStylusDownRef.current = true;
         isPinchingRef.current = false;
+        if (activePointerIdRef.current !== null && activePointerIdRef.current !== ev.pointerId) {
+          if (isDrawingRef.current && currentPointsRef.current.length > 0) {
+            commitActiveDrawingStrokeRef.current();
+          }
+          activePointerIdRef.current = ev.pointerId;
+        }
       }
 
       if (!isPointerAccepted(ev, 'move')) {
@@ -4807,7 +4947,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         typeof (ev as PointerEvent & { getCoalescedEvents?: () => PointerEvent[] }).getCoalescedEvents === 'function'
           ? (ev as PointerEvent & { getCoalescedEvents: () => PointerEvent[] }).getCoalescedEvents()
           : null;
-      const pressure = ev.pressure || 0.5;
+      const pressure = ev.pressure ?? 0;
 
       if (!isDrawingRef.current) {
         startImmediateStroke(
@@ -4840,6 +4980,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       ) {
         return;
       }
+      const layer = interactionLayerRef.current;
       if (ev.pointerType === 'pen') {
         confirmedDownPenIdsRef.current.delete(ev.pointerId);
         contactingPenIdsRef.current.delete(ev.pointerId);
@@ -4859,12 +5000,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       handledByNativeInkRef.current.add(ev);
       activeRecoveryWindowPointerIdRef.current = null;
       activePointerIdRef.current = null;
+      recordExpectedUpLostCapture(layer, ev.pointerId);
       if (isDrawingRef.current) {
         const pt = getStageCoords(ev.clientX, ev.clientY);
         const pts = currentPointsRef.current;
+        const rawUpPressure = ev.pressure ?? 0;
+        const minCutoff =
+          ev.pointerType === 'pen' && stylusConfigRef.current?.detectionMode === 'active_pen'
+            ? stylusConfigRef.current?.minPenPressure ?? 0
+            : 0;
+        const shouldSuppressUpTail =
+          ev.pointerType === 'pen' &&
+          minCutoff > 0 &&
+          strokeReachedMinPressureRef.current &&
+          rawUpPressure < minCutoff;
         const lastPt = pts[pts.length - 1];
-        if (!lastPt || Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) > 0.25) {
-          pts.push({ x: pt.x, y: pt.y, pressure: ev.pressure || 0.5 });
+        if (!shouldSuppressUpTail && (!lastPt || Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) > 0.25)) {
+          pts.push({ x: pt.x, y: pt.y, pressure: rawUpPressure > 0 ? rawUpPressure : 0.5 });
           drawIncrementalLivePoints(pts, currentColor, strokeWidth);
         }
         commitActiveDrawingStrokeRef.current();
@@ -4880,6 +5032,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       ) {
         return;
       }
+      const layer = interactionLayerRef.current;
       if (ev.pointerType === 'pen') {
         confirmedDownPenIdsRef.current.delete(ev.pointerId);
         contactingPenIdsRef.current.delete(ev.pointerId);
@@ -4903,6 +5056,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       handledByNativeInkRef.current.add(ev);
       activeRecoveryWindowPointerIdRef.current = null;
       activePointerIdRef.current = null;
+      recordExpectedUpLostCapture(layer, ev.pointerId);
       if (
         isDrawingRef.current &&
         currentPointsRef.current.length >= 1 &&
@@ -4915,6 +5069,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       } else {
         isDrawingRef.current = false;
         currentPointsRef.current = [];
+        strokeReachedMinPressureRef.current = false;
+        pendingPenTailPointsRef.current = [];
         renderedPointCountRef.current = 0;
         activeStrokeMetaRef.current = null;
         stopLiveStrokeStream();

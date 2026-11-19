@@ -40,6 +40,11 @@ import {
   runExplorerCleanupMigration,
   resetAllExplorerStorage,
   extractFileExtension,
+  EXPLORER_TABS_UPDATED_EVENT,
+  setSessionFileRef,
+  getSessionFileRef,
+  deleteSessionFileRef,
+  clearSessionFileRefs,
 } from '../../utils/fileExplorerStorage';
 
 interface FileExplorerViewProps {
@@ -83,7 +88,6 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
   // Hidden system input fallbacks
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const rawFileMapRef = useRef<Map<string, File>>(new Map());
   const reshareTargetTabIdRef = useRef<string | null>(null);
   const folderTabsRef = useRef<ExplorerFolderTab[]>([]);
   const addTabMenuRef = useRef<HTMLDivElement>(null);
@@ -177,7 +181,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       }
 
       if (tab.sourceType === 'local_path') {
-        const hasSessionFiles = tab.files.some((f) => rawFileMapRef.current.has(f.id));
+        const hasSessionFiles = tab.files.some((f) => Boolean(getSessionFileRef(f.id)));
         updatedTabs.push({
           ...tab,
           accessState: hasSessionFiles ? 'granted' : 'permission_required',
@@ -213,6 +217,18 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       active = false;
     };
   }, [rehydrateExplorerState]);
+
+  useEffect(() => {
+    const handleTabsUpdated = (e: Event) => {
+      const detail = (e as CustomEvent<ExplorerFolderTab[] | undefined>).detail;
+      const latest = Array.isArray(detail) ? detail : loadSavedFolderTabs();
+      setFolderTabs(latest);
+    };
+    window.addEventListener(EXPLORER_TABS_UPDATED_EVENT, handleTabsUpdated);
+    return () => {
+      window.removeEventListener(EXPLORER_TABS_UPDATED_EVENT, handleTabsUpdated);
+    };
+  }, []);
 
   // Reload single tab handler
   const handleReloadTab = async (tabId: string) => {
@@ -403,7 +419,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         await saveDirectoryHandle(targetTabId, dirHandle);
 
         if (existingTab) {
-          existingTab.files.forEach((f) => rawFileMapRef.current.delete(f.id));
+          existingTab.files.forEach((f) => deleteSessionFileRef(f.id));
           const updated = currentTabs.map((t) =>
             t.id === existingTab.id
               ? {
@@ -500,13 +516,13 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
 
       const parsedFiles = parseUploadedFolderFiles(fileList, finalFolderName, finalPath);
       if (matchedExisting) {
-        matchedExisting.files.forEach((f) => rawFileMapRef.current.delete(f.id));
+        matchedExisting.files.forEach((f) => deleteSessionFileRef(f.id));
       }
       for (let i = 0; i < fileList.length; i++) {
         const f = fileList[i];
         const relPath = f.webkitRelativePath ? f.webkitRelativePath : `${finalFolderName}/${f.name}`;
         const fileId = `${finalFolderName}__${relPath}__${f.size}`;
-        rawFileMapRef.current.set(fileId, f);
+        setSessionFileRef(fileId, f);
       }
 
       if (matchedExisting) {
@@ -599,6 +615,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
             fileHandle: fh,
             isMissing: false,
           };
+          setSessionFileRef(item.id, file);
 
           if (existingMatch) {
             const updated = currentTabs.map((t) =>
@@ -675,9 +692,9 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       const tabId = existingMatch ? existingMatch.id : `tab-file-${Date.now()}`;
       const itemId = `${tabId}__${file.name}`;
       if (existingMatch) {
-        existingMatch.files.forEach((f) => rawFileMapRef.current.delete(f.id));
+        existingMatch.files.forEach((f) => deleteSessionFileRef(f.id));
       }
-      rawFileMapRef.current.set(itemId, file);
+      setSessionFileRef(itemId, file);
 
       const item: ExplorerFileItem = {
         id: itemId,
@@ -809,7 +826,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
       void deleteDirectoryHandle(tabId);
     }
     if (targetTab) {
-      targetTab.files.forEach((f) => rawFileMapRef.current.delete(f.id));
+      targetTab.files.forEach((f) => deleteSessionFileRef(f.id));
     }
     const updated = folderTabs.filter((t) => t.id !== tabId);
     setFolderTabs(updated);
@@ -826,14 +843,14 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
 
   const handleResetAllExplorerTabs = async () => {
     await resetAllExplorerStorage();
-    rawFileMapRef.current.clear();
+    clearSessionFileRefs();
     setFolderTabs([]);
     setActiveTabId('home');
   };
 
   // Remove file reference from folder
   const handleRemoveFileReference = (fileId: string) => {
-    rawFileMapRef.current.delete(fileId);
+    deleteSessionFileRef(fileId);
     const updatedTabs = folderTabs.map((t) => {
       const nextFiles = t.files.filter((f) => f.id !== fileId);
       return {
@@ -1158,7 +1175,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         <FolderContentsTab
           folderTab={activeTab}
           onOpenFile={(file) => {
-            onOpenFile(file, rawFileMapRef.current.get(file.id));
+            onOpenFile(file, getSessionFileRef(file.id));
             onCloseModal();
           }}
           onMoveFile={(file) => {
@@ -1205,7 +1222,7 @@ export const FileExplorerView: React.FC<FileExplorerViewProps> = ({
         folderTabs={folderTabs}
         activeTabId={classicSelectedTabId || activeTabId}
         onOpenFile={(file) => {
-          onOpenFile(file, rawFileMapRef.current.get(file.id));
+          onOpenFile(file, getSessionFileRef(file.id));
           onCloseModal();
         }}
         onPinSubfolderTab={(folder) => void handlePinSubfolderTab(folder)}

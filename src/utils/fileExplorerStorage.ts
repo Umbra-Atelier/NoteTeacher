@@ -38,6 +38,46 @@ export function extractFileExtension(filename: string): string {
   return idx !== -1 ? filename.slice(idx).toLowerCase() : '.file';
 }
 
+export function resolveDroppedFileSupport(file: File): {
+  supported: boolean;
+  extension: string;
+} {
+  const idx = file.name.lastIndexOf('.');
+  if (idx !== -1) {
+    const ext = file.name.slice(idx).toLowerCase();
+    if (SUPPORTED_EXTENSIONS.has(ext)) {
+      return { supported: true, extension: ext };
+    }
+  }
+  const mime = (file.type || '').toLowerCase();
+  if (mime === 'application/pdf') return { supported: true, extension: '.pdf' };
+  if (mime === 'image/png') return { supported: true, extension: '.png' };
+  if (mime === 'image/jpeg' || mime === 'image/jpg') return { supported: true, extension: '.jpg' };
+  if (mime === 'application/json') return { supported: true, extension: '.json' };
+  return { supported: false, extension: extractFileExtension(file.name) };
+}
+
+export const EXPLORER_TABS_UPDATED_EVENT = 'noteteacher:explorer-tabs-updated';
+
+// Module-level session registry for dropped / input-picked local_path files so references survive modal close/reopen
+const sessionFileMap = new Map<string, File>();
+
+export function setSessionFileRef(fileId: string, file: File): void {
+  sessionFileMap.set(fileId, file);
+}
+
+export function getSessionFileRef(fileId: string): File | undefined {
+  return sessionFileMap.get(fileId);
+}
+
+export function deleteSessionFileRef(fileId: string): void {
+  sessionFileMap.delete(fileId);
+}
+
+export function clearSessionFileRefs(): void {
+  sessionFileMap.clear();
+}
+
 // Open IndexedDB for FileSystemHandle persistence
 function openExplorerDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -520,9 +560,158 @@ export function saveFolderTabs(tabs: ExplorerFolderTab[]): void {
       missingCount: t.missingCount,
     }));
     localStorage.setItem(LOCAL_STORAGE_TABS_KEY, JSON.stringify(serializable));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent(EXPLORER_TABS_UPDATED_EVENT, { detail: cleanTabs })
+      );
+    }
   } catch (err) {
     console.warn('Failed to save folder tabs to localStorage:', err);
   }
+}
+
+function buildDroppedPathBreadcrumb(
+  file: File,
+  relativePathHint?: string | null,
+  resolvedFolderPath?: string | null
+): string {
+  if (resolvedFolderPath) {
+    return resolvedFolderPath;
+  }
+
+  const nativePath = (file as File & { path?: string }).path;
+  if (typeof nativePath === 'string' && nativePath.trim()) {
+    const normalizedNative = nativePath.trim().replace(/\\/g, '/');
+    return normalizedNative.startsWith('/') ? normalizedNative : `/${normalizedNative}`;
+  }
+
+  const candidateRel = (file.webkitRelativePath || relativePathHint || '').trim().replace(/\\/g, '/');
+  if (candidateRel) {
+    const trimmedRel = candidateRel.replace(/^\/+/, '');
+    if (trimmedRel && trimmedRel.includes('/')) {
+      return `/Local Device/${trimmedRel}`;
+    }
+  }
+
+  return `/Local Device/${file.name}`;
+}
+
+export async function registerDroppedFileInExplorer(
+  file: File,
+  options?: {
+    fileHandle?: FileSystemFileHandle | null;
+    relativePath?: string | null;
+  }
+): Promise<{
+  tab: ExplorerFolderTab;
+  item: ExplorerFileItem;
+  updatedTabs: ExplorerFolderTab[];
+}> {
+  await runExplorerCleanupMigration();
+  const currentTabs = loadSavedFolderTabs();
+  const fileHandle = options?.fileHandle || undefined;
+
+  let resolvedFolderPath: string | null = null;
+  if (fileHandle) {
+    for (const t of currentTabs) {
+      if (t.isSingleFileTab || t.sourceType !== 'local_handle') continue;
+      const dirHandle = t.dirHandle || (await getDirectoryHandle(t.id));
+      if (dirHandle && typeof dirHandle.resolve === 'function') {
+        try {
+          const segments = await dirHandle.resolve(fileHandle);
+          if (segments && segments.length > 0) {
+            resolvedFolderPath = `${t.pathBreadcrumb.replace(/\/+$/, '')}/${segments.join('/')}`;
+            break;
+          }
+        } catch {
+          // Ignore resolve failures across unrelated handles
+        }
+      }
+    }
+  }
+
+  const pathBreadcrumb = buildDroppedPathBreadcrumb(
+    file,
+    options?.relativePath,
+    resolvedFolderPath
+  );
+  const { extension } = resolveDroppedFileSupport(file);
+
+  let existingMatch: ExplorerFolderTab | undefined;
+  if (fileHandle) {
+    for (const t of currentTabs) {
+      if (!t.isSingleFileTab) continue;
+      const candidateHandle =
+        t.sourceType === 'local_handle' ? await getSingleFileHandle(t.id) : null;
+      if (candidateHandle && typeof fileHandle.isSameEntry === 'function') {
+        try {
+          if (await fileHandle.isSameEntry(candidateHandle)) {
+            existingMatch = t;
+            break;
+          }
+        } catch {}
+      }
+    }
+  }
+  if (!existingMatch) {
+    existingMatch = currentTabs.find(
+      (t) =>
+        t.isSingleFileTab &&
+        (t.pathBreadcrumb === pathBreadcrumb ||
+          t.lastKnownPath === pathBreadcrumb ||
+          t.fileName === file.name ||
+          t.name === file.name)
+    );
+  }
+
+  const tabId = existingMatch
+    ? existingMatch.id
+    : `tab-file-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const itemId = `${tabId}__${file.name}`;
+
+  if (existingMatch) {
+    existingMatch.files.forEach((f) => deleteSessionFileRef(f.id));
+  }
+  setSessionFileRef(itemId, file);
+
+  const sourceType: 'local_handle' | 'local_path' = fileHandle ? 'local_handle' : 'local_path';
+  if (fileHandle) {
+    await saveSingleFileHandle(tabId, fileHandle);
+  }
+
+  const item: ExplorerFileItem = {
+    id: itemId,
+    name: file.name,
+    extension,
+    sizeBytes: file.size,
+    lastModified: file.lastModified || Date.now(),
+    pathBreadcrumb,
+    sourceType,
+    fileHandle,
+    isMissing: false,
+  };
+
+  const tab: ExplorerFolderTab = {
+    id: tabId,
+    name: file.name,
+    iconType: 'file',
+    sourceType,
+    pathBreadcrumb,
+    files: [item],
+    missingCount: 0,
+    accessState: 'granted',
+    isSingleFileTab: true,
+    fileName: file.name,
+    lastKnownPath: pathBreadcrumb,
+  };
+
+  const updatedTabs = existingMatch
+    ? currentTabs.map((t) => (t.id === existingMatch.id ? tab : t))
+    : [...currentTabs, tab];
+
+  saveFolderTabs(updatedTabs);
+
+  return { tab, item, updatedTabs };
 }
 
 // Active file context persistence

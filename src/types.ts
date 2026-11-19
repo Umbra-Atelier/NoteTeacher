@@ -23,6 +23,7 @@ export interface StylusDetectionConfig {
   detectionMode: StylusDetectionMode;
   maxTipSizePx: number;
   allowMouseInput: boolean;
+  minPenPressure: number;
 }
 
 export interface CameraViewportState {

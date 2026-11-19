@@ -15,6 +15,7 @@ import {
   AlignLeft,
   Grid,
   CircleDot,
+  Upload,
 } from 'lucide-react';
 import {
   AngleNegativeDirection,
@@ -85,6 +86,8 @@ import {
   getSavedActiveFileContext,
   loadSavedFolderTabs,
   queryHandlePermission,
+  registerDroppedFileInExplorer,
+  resolveDroppedFileSupport,
   runExplorerCleanupMigration,
   saveActiveFileContext,
   saveDirectoryHandle,
@@ -133,11 +136,9 @@ const EMPTY_CALCULATORS: CalculatorBox[] = [];
 const EMPTY_IMAGES: CanvasImage[] = [];
 const EMPTY_DICTATED: DictatedTextBox[] = [];
 
-function cloneDocData<T>(val: T): T {
-  if (typeof structuredClone === 'function') {
-    return structuredClone(val);
-  }
-  return JSON.parse(JSON.stringify(val)) as T;
+function clampMinPenPressure(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.round(Math.max(0, Math.min(0.3, value)) * 100) / 100;
 }
 
 export default function App() {
@@ -262,6 +263,17 @@ export default function App() {
     kind: 'info' | 'success' | 'error';
     message: string;
   } | null>(null);
+  const [isExternalFileDragging, setIsExternalFileDragging] = useState(false);
+  const fileDragDepthRef = useRef(0);
+  const handleDroppedEntriesRef = useRef<
+    (
+      entries: Array<{
+        file: File | null;
+        entryPath: string | null;
+        handlePromise: Promise<FileSystemHandle | null>;
+      }>
+    ) => Promise<void>
+  >(async () => {});
 
   useEffect(() => {
     if (!appStatusNotice || appStatusNotice.kind === 'info') return;
@@ -330,6 +342,7 @@ export default function App() {
             maxTipSizePx: typeof parsed.maxTipSizePx === 'number' ? parsed.maxTipSizePx : 14,
             allowMouseInput:
               typeof parsed.allowMouseInput === 'boolean' ? parsed.allowMouseInput : true,
+            minPenPressure: clampMinPenPressure(parsed.minPenPressure),
           };
         }
       }
@@ -338,12 +351,20 @@ export default function App() {
       detectionMode: 'active_pen',
       maxTipSizePx: 14,
       allowMouseInput: true,
+      minPenPressure: 0,
     };
   });
 
   const handleUpdateStylusConfig = (updated: Partial<StylusDetectionConfig>) => {
     setStylusConfigState((prev) => {
-      const next = { ...prev, ...updated };
+      const next: StylusDetectionConfig = {
+        ...prev,
+        ...updated,
+        minPenPressure:
+          updated.minPenPressure !== undefined
+            ? clampMinPenPressure(updated.minPenPressure)
+            : clampMinPenPressure(prev.minPenPressure),
+      };
       try {
         localStorage.setItem('noteteacher_stylus_config', JSON.stringify(next));
       } catch {}
@@ -911,6 +932,7 @@ export default function App() {
 
   const syncChannelRef = useRef<BroadcastChannel | null>(null);
   const backupCameraTimerRef = useRef<number | null>(null);
+  const compactSyncTimerRef = useRef<number | null>(null);
   const idbSaveTimerRef = useRef<number | null>(null);
   const lastBroadcastAssetsSigRef = useRef<string>('');
   const hasReceivedLiveSyncRef = useRef<boolean>(false);
@@ -1384,6 +1406,9 @@ export default function App() {
         if (backupCameraTimerRef.current) {
           window.clearTimeout(backupCameraTimerRef.current);
         }
+        if (compactSyncTimerRef.current) {
+          window.clearTimeout(compactSyncTimerRef.current);
+        }
         if (idbSaveTimerRef.current) {
           window.clearTimeout(idbSaveTimerRef.current);
         }
@@ -1434,6 +1459,10 @@ export default function App() {
     const assetsChanged = assetsSig !== lastBroadcastAssetsSigRef.current;
 
     if (assetsChanged) {
+      if (compactSyncTimerRef.current) {
+        window.clearTimeout(compactSyncTimerRef.current);
+        compactSyncTimerRef.current = null;
+      }
       lastBroadcastAssetsSigRef.current = assetsSig;
       postSyncMessageSafe(syncChannelRef.current, {
         type: 'sync_state',
@@ -1442,10 +1471,28 @@ export default function App() {
       void saveLivestreamSnapshotToDb(fullPayload);
       saveSmallLocalStorageBackup(fullPayload);
     } else {
-      postSyncMessageSafe(syncChannelRef.current, {
-        type: 'sync_state',
-        payload: buildCompactSyncPayload(fullPayload),
-      });
+      if (compactSyncTimerRef.current) {
+        window.clearTimeout(compactSyncTimerRef.current);
+      }
+      compactSyncTimerRef.current = window.setTimeout(() => {
+        compactSyncTimerRef.current = null;
+        const cur = latestSyncStateRef.current;
+        const syncHydratedPages = cur.pages.map((p) => {
+          if (p.id !== cur.currentPageId || p.template !== 'pdf') return p;
+          const cached = getCachedFullPdfPageUrl(p);
+          return cached && p.pdfDataUrl !== cached ? { ...p, pdfDataUrl: cached } : p;
+        });
+        const snap: LivestreamDocumentState = {
+          ...cur,
+          pages: syncHydratedPages,
+          graphs: syncLiveDesmosBoxes(cur.graphs),
+          updatedAt: Date.now(),
+        };
+        postSyncMessageSafe(syncChannelRef.current, {
+          type: 'sync_state',
+          payload: buildCompactSyncPayload(snap),
+        });
+      }, 40);
       if (idbSaveTimerRef.current) {
         window.clearTimeout(idbSaveTimerRef.current);
       }
@@ -1583,17 +1630,17 @@ export default function App() {
     }
   };
 
-  // Push snapshot to undo stack
+  // Push structural-sharing snapshot to undo stack (<0.1ms so rapid stylus taps never stall)
   const saveSnapshot = useCallback(() => {
     setHistoryStack((prev) => [
       ...prev.slice(-25),
       {
-        strokes: cloneDocData(strokes),
-        shapes: cloneDocData(shapes),
-        graphs: cloneDocData(graphs),
-        calculators: cloneDocData(calculators),
-        images: cloneDocData(images),
-        dictatedTextBoxes: cloneDocData(dictatedTextBoxes),
+        strokes: [...strokes],
+        shapes: [...shapes],
+        graphs: [...graphs],
+        calculators: [...calculators],
+        images: [...images],
+        dictatedTextBoxes: [...dictatedTextBoxes],
       },
     ]);
     setRedoStack([]);
@@ -1607,12 +1654,12 @@ export default function App() {
     setRedoStack((prev) => [
       ...prev,
       {
-        strokes: cloneDocData(strokes),
-        shapes: cloneDocData(shapes),
-        graphs: cloneDocData(graphs),
-        calculators: cloneDocData(calculators),
-        images: cloneDocData(images),
-        dictatedTextBoxes: cloneDocData(dictatedTextBoxes),
+        strokes: [...strokes],
+        shapes: [...shapes],
+        graphs: [...graphs],
+        calculators: [...calculators],
+        images: [...images],
+        dictatedTextBoxes: [...dictatedTextBoxes],
       },
     ]);
     setStrokes(previous.strokes);
@@ -1632,12 +1679,12 @@ export default function App() {
     setHistoryStack((prev) => [
       ...prev,
       {
-        strokes: cloneDocData(strokes),
-        shapes: cloneDocData(shapes),
-        graphs: cloneDocData(graphs),
-        calculators: cloneDocData(calculators),
-        images: cloneDocData(images),
-        dictatedTextBoxes: cloneDocData(dictatedTextBoxes),
+        strokes: [...strokes],
+        shapes: [...shapes],
+        graphs: [...graphs],
+        calculators: [...calculators],
+        images: [...images],
+        dictatedTextBoxes: [...dictatedTextBoxes],
       },
     ]);
     setStrokes(next.strokes);
@@ -2328,8 +2375,8 @@ export default function App() {
 
       if (!preEraseBackupRef.current) {
         preEraseBackupRef.current = {
-          strokes: JSON.parse(JSON.stringify(curStrokes)),
-          shapes: JSON.parse(JSON.stringify(curShapes)),
+          strokes: [...curStrokes],
+          shapes: [...curShapes],
         };
       }
 
@@ -2354,10 +2401,10 @@ export default function App() {
         {
           strokes: backup.strokes,
           shapes: backup.shapes,
-          graphs: JSON.parse(JSON.stringify(graphs)),
-          calculators: JSON.parse(JSON.stringify(calculators)),
-          images: JSON.parse(JSON.stringify(images)),
-          dictatedTextBoxes: JSON.parse(JSON.stringify(dictatedTextBoxes)),
+          graphs: [...graphs],
+          calculators: [...calculators],
+          images: [...images],
+          dictatedTextBoxes: [...dictatedTextBoxes],
         },
       ]);
       setRedoStack([]);
@@ -3388,6 +3435,215 @@ export default function App() {
       message: `"${fileItem.name}" needs to be re-shared before it can be opened.`,
     });
   };
+
+  handleDroppedEntriesRef.current = async (entries) => {
+    const resolved: Array<{
+      file: File;
+      fileHandle?: FileSystemFileHandle;
+      relativePath?: string | null;
+    }> = [];
+
+    for (const entry of entries) {
+      let handle: FileSystemHandle | null = null;
+      try {
+        handle = await entry.handlePromise;
+      } catch {
+        handle = null;
+      }
+      if (handle && handle.kind === 'directory') {
+        continue;
+      }
+      const fileHandle =
+        handle && handle.kind === 'file' ? (handle as FileSystemFileHandle) : undefined;
+      let file = entry.file;
+      if (!file && fileHandle) {
+        try {
+          file = await fileHandle.getFile();
+        } catch {
+          file = null;
+        }
+      }
+      if (file) {
+        resolved.push({
+          file,
+          fileHandle,
+          relativePath: entry.entryPath,
+        });
+      }
+    }
+
+    if (resolved.length === 0) return;
+
+    const supported = resolved.filter((r) => resolveDroppedFileSupport(r.file).supported);
+    if (supported.length === 0) {
+      const firstName = resolved[0].file.name;
+      setAppStatusNotice({
+        kind: 'error',
+        message: `"${firstName}" is not a supported format. Supported: .noteteacher, .pdf, .json, .png, .jpg, .jpeg, .one`,
+      });
+      return;
+    }
+
+    let lastOpened: { item: ExplorerFileItem; file: File } | null = null;
+    let latestTabs: ExplorerFolderTab[] | null = null;
+
+    // Register every supported dropped file in the File Explorer tab
+    const registered: Array<{
+      item: ExplorerFileItem;
+      file: File;
+      ext: string;
+    }> = [];
+
+    for (const candidate of supported) {
+      const { item, updatedTabs } = await registerDroppedFileInExplorer(candidate.file, {
+        fileHandle: candidate.fileHandle,
+        relativePath: candidate.relativePath,
+      });
+      latestTabs = updatedTabs;
+      registered.push({
+        item,
+        file: candidate.file,
+        ext: item.extension.toLowerCase(),
+      });
+    }
+
+    if (latestTabs) {
+      setSaveExplorerTabs(latestTabs);
+    }
+
+    // If any .noteteacher/.json project was dropped, open the first project file; otherwise open all dropped PDFs/images
+    const projectDrop = registered.find(
+      (r) => r.ext === '.noteteacher' || r.ext === '.json' || r.ext === '.one'
+    );
+    if (projectDrop) {
+      await handleOpenFileFromExplorer(projectDrop.item, projectDrop.file);
+      lastOpened = { item: projectDrop.item, file: projectDrop.file };
+    } else {
+      for (const entry of registered) {
+        await handleOpenFileFromExplorer(entry.item, entry.file);
+        lastOpened = { item: entry.item, file: entry.file };
+      }
+    }
+
+    if (lastOpened) {
+      setAppStatusNotice({
+        kind: 'success',
+        message: `Opened "${lastOpened.item.name}" · Added to File tab (${lastOpened.item.pathBreadcrumb})`,
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (isViewerTab) return;
+
+    const hasExternalFiles = (e: DragEvent): boolean => {
+      const types = e.dataTransfer?.types;
+      if (!types) return false;
+      return Array.from(types).includes('Files');
+    };
+
+    const resetDragState = () => {
+      fileDragDepthRef.current = 0;
+      setIsExternalFileDragging(false);
+    };
+
+    const handleWindowDragEnter = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      fileDragDepthRef.current += 1;
+      setIsExternalFileDragging(true);
+    };
+
+    const handleWindowDragOver = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+      setIsExternalFileDragging(true);
+    };
+
+    const handleWindowDragLeave = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+      if (fileDragDepthRef.current === 0) {
+        setIsExternalFileDragging(false);
+      }
+    };
+
+    const handleWindowDrop = (e: DragEvent) => {
+      if (!hasExternalFiles(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Synchronously extract DataTransfer items/handles/files BEFORE any await (Chromium clears DataTransfer after handler yields)
+      const dtItems = e.dataTransfer?.items ? Array.from(e.dataTransfer.items) : [];
+      const dtFiles = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+
+      let extracted: Array<{
+        file: File | null;
+        entryPath: string | null;
+        handlePromise: Promise<FileSystemHandle | null>;
+      }> = [];
+
+      if (dtItems.length > 0) {
+        extracted = dtItems
+          .filter((item) => item.kind === 'file')
+          .map((item) => {
+            let entryPath: string | null = null;
+            try {
+              if (typeof item.webkitGetAsEntry === 'function') {
+                entryPath = item.webkitGetAsEntry()?.fullPath || null;
+              }
+            } catch {
+              entryPath = null;
+            }
+            const itemWithHandle = item as DataTransferItem & {
+              getAsFileSystemHandle?: () => Promise<FileSystemHandle | null>;
+            };
+            const handlePromise =
+              typeof itemWithHandle.getAsFileSystemHandle === 'function'
+                ? itemWithHandle.getAsFileSystemHandle().catch(() => null)
+                : Promise.resolve(null);
+            return {
+              file: item.getAsFile(),
+              entryPath,
+              handlePromise,
+            };
+          });
+      }
+
+      if (extracted.length === 0 && dtFiles.length > 0) {
+        extracted = dtFiles.map((file) => ({
+          file,
+          entryPath: null,
+          handlePromise: Promise.resolve(null),
+        }));
+      }
+
+      resetDragState();
+      if (extracted.length > 0) {
+        void handleDroppedEntriesRef.current(extracted);
+      }
+    };
+
+    window.addEventListener('dragenter', handleWindowDragEnter, true);
+    window.addEventListener('dragover', handleWindowDragOver, true);
+    window.addEventListener('dragleave', handleWindowDragLeave, true);
+    window.addEventListener('drop', handleWindowDrop, true);
+    window.addEventListener('dragend', resetDragState, true);
+    window.addEventListener('blur', resetDragState);
+
+    return () => {
+      window.removeEventListener('dragenter', handleWindowDragEnter, true);
+      window.removeEventListener('dragover', handleWindowDragOver, true);
+      window.removeEventListener('dragleave', handleWindowDragLeave, true);
+      window.removeEventListener('drop', handleWindowDrop, true);
+      window.removeEventListener('dragend', resetDragState, true);
+      window.removeEventListener('blur', resetDragState);
+    };
+  }, [isViewerTab]);
 
   const refreshSaveExplorerTabs = useCallback(async () => {
     await runExplorerCleanupMigration();
@@ -4665,6 +4921,28 @@ export default function App() {
             onReplayTutorial={handleStartTutorial}
           />
         </>
+      )}
+      {/* 8. EXTERNAL FILE DRAG-AND-DROP OVERLAY */}
+      {isExternalFileDragging && !isViewerTab && (
+        <div
+          data-testid="app-file-drop-overlay"
+          className="fixed inset-0 z-[10300] bg-slate-950/45 backdrop-blur-xs flex items-center justify-center p-6 pointer-events-none animate-in fade-in duration-100"
+        >
+          <div className="w-full max-w-md rounded-2xl border-2 border-dashed border-blue-400 bg-white/95 dark:bg-slate-900/95 shadow-2xl p-8 text-center space-y-3">
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-blue-50 dark:bg-blue-950/80 text-blue-600 dark:text-blue-400 flex items-center justify-center">
+              <Upload className="w-6 h-6" />
+            </div>
+            <div className="text-base font-bold text-slate-900 dark:text-slate-100">
+              Drop file to open in workspace
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+              Opens your document right here and adds its path to the File tab.
+            </p>
+            <div className="text-[11px] font-mono text-slate-400 pt-1">
+              Supported: .noteteacher · .pdf · .json · .png · .jpg · .jpeg · .one
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

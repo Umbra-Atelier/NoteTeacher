@@ -427,10 +427,20 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     tiltX: number;
     tiltY: number;
     accepted: boolean;
+    belowPressureCutoff: boolean;
+    minObservedPenPressure: number | null;
   } | null>(null);
   const [showStylusTestModal, setShowStylusTestModal] = useState(false);
   const [testModalDots, setTestModalDots] = useState<
-    Array<{ id: number; x: number; y: number; pointerType: string; size: number; accepted: boolean }>
+    Array<{
+      id: number;
+      x: number;
+      y: number;
+      pointerType: string;
+      size: number;
+      accepted: boolean;
+      belowCutoff?: boolean;
+    }>
   >([]);
 
   // Palette Reordering and Trash State
@@ -452,6 +462,23 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     ensureTouchGeometryTracker();
   }, []);
 
+  const currentMinPenPressure = stylusConfig.minPenPressure ?? 0;
+
+  const getRecommendedPenCutoff = (
+    sample: {
+      pointerType: string;
+      pressure: number;
+      minObservedPenPressure: number | null;
+    } | null
+  ): number => {
+    if (!sample || sample.pointerType !== 'pen') return 0.08;
+    const candidate = sample.minObservedPenPressure ?? (sample.pressure > 0 && sample.pressure < 0.26 ? sample.pressure : null);
+    if (candidate !== null && candidate > 0 && candidate <= 0.28) {
+      return Math.min(0.3, Math.max(0.04, Number((candidate + 0.02).toFixed(2))));
+    }
+    return 0.08;
+  };
+
   const evaluatePointerAsStylus = (
     pointerType: string,
     w: number,
@@ -472,22 +499,45 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     return false;
   };
 
-  const applySampleFromPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+  const applySampleFromPointer = (
+    e: React.PointerEvent<HTMLDivElement>,
+    phase: 'down' | 'move' = 'down'
+  ) => {
     const metrics = getEffectiveTouchMetrics(e.nativeEvent);
     const w = metrics.width;
     const h = metrics.height;
-    const pressure = e.pressure || 0;
+    const pressure = e.pressure ?? 0;
     const accepted = evaluatePointerAsStylus(e.pointerType, w, h, pressure);
-    setLastStylusSample({
-      pointerType: e.pointerType,
-      width: w,
-      height: h,
-      pressure: Number(pressure.toFixed(2)),
-      tiltX: Math.round(e.tiltX || 0),
-      tiltY: Math.round(e.tiltY || 0),
-      accepted,
+    const minCutoff = stylusConfig.detectionMode === 'active_pen' ? currentMinPenPressure : 0;
+    const belowPressureCutoff =
+      e.pointerType === 'pen' &&
+      minCutoff > 0 &&
+      phase === 'move' &&
+      pressure < minCutoff;
+    setLastStylusSample((prev) => {
+      const prevMin =
+        phase === 'move' && prev?.pointerType === 'pen' ? prev.minObservedPenPressure : null;
+      const observedTail =
+        e.pointerType === 'pen' && pressure > 0 && pressure < 0.28 ? Number(pressure.toFixed(2)) : null;
+      const minObservedPenPressure =
+        observedTail !== null
+          ? prevMin !== null
+            ? Math.min(prevMin, observedTail)
+            : observedTail
+          : prevMin;
+      return {
+        pointerType: e.pointerType,
+        width: w,
+        height: h,
+        pressure: Number(pressure.toFixed(2)),
+        tiltX: Math.round(e.tiltX || 0),
+        tiltY: Math.round(e.tiltY || 0),
+        accepted,
+        belowPressureCutoff,
+        minObservedPenPressure,
+      };
     });
-    return { w, h, size: metrics.size, accepted };
+    return { w, h, size: metrics.size, accepted, belowPressureCutoff };
   };
 
   const applySampleFromTouch = (e: React.TouchEvent<HTMLDivElement>, updateDots: boolean) => {
@@ -500,16 +550,22 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     const h = geom.height;
     const pType = geom.touchType === 'stylus' ? 'pen' : 'touch';
     const accepted = evaluatePointerAsStylus(pType, w, h, geom.force);
+    const minCutoff = stylusConfig.detectionMode === 'active_pen' ? currentMinPenPressure : 0;
     setLastStylusSample((prev) => {
       if (prev && prev.pointerType === 'pen' && pType !== 'pen') return prev;
+      const nextPressure = Number((geom.force || prev?.pressure || 0).toFixed(2));
+      const belowPressureCutoff =
+        pType === 'pen' && minCutoff > 0 && nextPressure > 0 && nextPressure < minCutoff;
       return {
         pointerType: pType,
         width: w,
         height: h,
-        pressure: Number((geom.force || prev?.pressure || 0).toFixed(2)),
+        pressure: nextPressure,
         tiltX: prev?.tiltX ?? 0,
         tiltY: prev?.tiltY ?? 0,
         accepted,
+        belowPressureCutoff,
+        minObservedPenPressure: prev?.minObservedPenPressure ?? null,
       };
     });
     if (updateDots) {
@@ -1648,9 +1704,14 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   </div>
 
                   {activeFileContext && (
-                    <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800/80 text-[11px] font-mono text-blue-700 dark:text-blue-300 max-w-xs truncate">
+                    <div
+                      title={activeFileContext.pathBreadcrumb || activeFileContext.name}
+                      className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800/80 text-[11px] font-mono text-blue-700 dark:text-blue-300 max-w-md truncate"
+                    >
                       <span className="font-bold shrink-0">Open:</span>
-                      <span className="truncate">{activeFileContext.name}</span>
+                      <span className="truncate">
+                        {activeFileContext.pathBreadcrumb || activeFileContext.name}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -3121,11 +3182,36 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 </div>
               </div>
 
-              {stylusConfig.detectionMode === 'smart_tip' && (
+              {stylusConfig.detectionMode === 'active_pen' ? (
+                <div
+                  className="flex flex-col gap-0.5 px-2.5 py-1 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700"
+                  title="Minimum active pen pressure needed to continue ink as the stylus lifts off glass (0.00–0.30). Quick initial taps are never dropped."
+                >
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-slate-600 dark:text-slate-300 font-medium">
+                    <span>Lift Cutoff</span>
+                    <span className="font-mono tabular-nums font-bold text-cyan-600 dark:text-cyan-400">
+                      {currentMinPenPressure.toFixed(2)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.30"
+                    step="0.01"
+                    value={currentMinPenPressure}
+                    aria-label="Active Pen Lift Cutoff Pressure"
+                    data-testid="ribbon-lift-cutoff-slider"
+                    onChange={(e) =>
+                      onUpdateStylusConfig({ minPenPressure: parseFloat(e.target.value) })
+                    }
+                    className="w-24 accent-cyan-600 cursor-pointer"
+                  />
+                </div>
+              ) : (
                 <div className="flex flex-col gap-0.5 px-2 py-1 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700">
                   <div className="flex items-center justify-between gap-2 text-[10px] text-slate-600 dark:text-slate-300 font-medium">
                     <span>Max Tip Size</span>
-                    <span className="font-mono font-bold text-cyan-600 dark:text-cyan-400">
+                    <span className="font-mono tabular-nums font-bold text-cyan-600 dark:text-cyan-400">
                       {stylusConfig.maxTipSizePx}px
                     </span>
                   </div>
@@ -3157,13 +3243,13 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 <div
                   onPointerDown={(e) => {
                     e.stopPropagation();
-                    applySampleFromPointer(e);
+                    applySampleFromPointer(e, 'down');
                   }}
                   onPointerMove={(e) => {
-                    if (e.buttons > 0 || e.pointerType === 'touch') {
+                    if (e.buttons > 0 || e.pressure > 0 || e.pointerType === 'touch') {
                       const metrics = getEffectiveTouchMetrics(e.nativeEvent);
-                      if (metrics.isMeasured) {
-                        applySampleFromPointer(e);
+                      if (e.pointerType === 'pen' || metrics.isMeasured) {
+                        applySampleFromPointer(e, 'move');
                       }
                     }
                   }}
@@ -3176,22 +3262,30 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                     applySampleFromTouch(e, false);
                   }}
                   style={{ touchAction: 'none' }}
-                  className="px-3 py-1.5 rounded-xl border-2 border-dashed border-cyan-400 dark:border-cyan-700 bg-cyan-50/60 dark:bg-cyan-950/30 hover:bg-cyan-50 dark:hover:bg-cyan-950/50 cursor-crosshair select-none flex flex-col justify-center min-w-[150px]"
-                  title="Tap or rest stylus tip here to inspect what your device reports"
+                  className="px-3 py-1.5 rounded-xl border-2 border-dashed border-cyan-400 dark:border-cyan-700 bg-cyan-50/60 dark:bg-cyan-950/30 hover:bg-cyan-50 dark:hover:bg-cyan-950/50 cursor-crosshair select-none flex flex-col justify-center min-w-[160px]"
+                  title="Tap or drag stylus tip here to inspect reported size, pressure & lift tail status"
                 >
                   <span className="text-[10px] font-bold text-cyan-800 dark:text-cyan-200">
                     Tap Here to Test Stylus
                   </span>
                   {lastStylusSample ? (
-                    <span className="text-[10px] font-mono text-slate-600 dark:text-slate-300">
+                    <span className="text-[10px] font-mono tabular-nums text-slate-600 dark:text-slate-300">
                       {lastStylusSample.pointerType.toUpperCase()} · {lastStylusSample.width}×
-                      {lastStylusSample.height}px · P:{lastStylusSample.pressure}{' '}
+                      {lastStylusSample.height}px · P:{lastStylusSample.pressure.toFixed(2)}{' '}
                       <strong
                         className={
-                          lastStylusSample.accepted ? 'text-emerald-600' : 'text-rose-600'
+                          !lastStylusSample.accepted
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : lastStylusSample.belowPressureCutoff
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-emerald-600 dark:text-emerald-400'
                         }
                       >
-                        {lastStylusSample.accepted ? '✓ OK' : '✕ Blocked'}
+                        {!lastStylusSample.accepted
+                          ? '✕ Blocked'
+                          : lastStylusSample.belowPressureCutoff
+                          ? '✕ Tail Filtered'
+                          : '✓ OK'}
                       </strong>
                     </span>
                   ) : (
@@ -3201,21 +3295,35 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   )}
                 </div>
 
-                {lastStylusSample && lastStylusSample.pointerType === 'touch' && !lastStylusSample.accepted && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const tipSize = Math.max(lastStylusSample.width, lastStylusSample.height, 1);
-                      onUpdateStylusConfig({
-                        detectionMode: 'smart_tip',
-                        maxTipSizePx: Math.max(8, Math.min(32, tipSize + 6)),
-                      });
-                    }}
-                    className="px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white text-[11px] font-bold shadow-xs transition-colors"
-                  >
-                    Auto-Setup
-                  </button>
-                )}
+                {lastStylusSample &&
+                  ((lastStylusSample.pointerType === 'touch' && !lastStylusSample.accepted) ||
+                    (lastStylusSample.pointerType === 'pen' &&
+                      (stylusConfig.detectionMode !== 'active_pen' ||
+                        currentMinPenPressure === 0 ||
+                        (lastStylusSample.minObservedPenPressure !== null &&
+                          getRecommendedPenCutoff(lastStylusSample) !== currentMinPenPressure)))) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (lastStylusSample.pointerType === 'pen') {
+                          const cutoff = getRecommendedPenCutoff(lastStylusSample);
+                          onUpdateStylusConfig({
+                            detectionMode: 'active_pen',
+                            minPenPressure: cutoff,
+                          });
+                        } else {
+                          const tipSize = Math.max(lastStylusSample.width, lastStylusSample.height, 1);
+                          onUpdateStylusConfig({
+                            detectionMode: 'smart_tip',
+                            maxTipSizePx: Math.max(8, Math.min(32, tipSize + 6)),
+                          });
+                        }
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white text-[11px] font-bold shadow-xs transition-colors"
+                    >
+                      Auto-Setup
+                    </button>
+                  )}
 
                 <button
                   type="button"
@@ -3249,7 +3357,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                       Stylus Detection &amp; Palm Rejection Tester
                     </h3>
                     <p className="text-xs text-slate-500">
-                      Tap with your stylus and rest your wrist below to verify what your device sends.
+                      Tap or write &amp; lift with your stylus below to test contacts, pressure &amp; tail cutoff.
                     </p>
                   </div>
                   <button
@@ -3261,22 +3369,60 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   </button>
                 </div>
 
+                {/* Active Pen Lift Cutoff Slider directly inside Calibration Pad */}
+                <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700">
+                  <div className="flex flex-col">
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                      Active Pen Lift Cutoff Pressure
+                    </span>
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Quick taps always register; trailing lift points below cutoff are trimmed.
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <input
+                      type="range"
+                      min="0"
+                      max="0.30"
+                      step="0.01"
+                      value={currentMinPenPressure}
+                      aria-label="Calibration Pad Lift Cutoff Pressure"
+                      data-testid="modal-lift-cutoff-slider"
+                      onChange={(e) =>
+                        onUpdateStylusConfig({ minPenPressure: parseFloat(e.target.value) })
+                      }
+                      className="w-32 accent-cyan-600 cursor-pointer"
+                    />
+                    <span className="font-mono tabular-nums text-xs font-bold text-cyan-700 dark:text-cyan-300 min-w-[3rem] text-right">
+                      {currentMinPenPressure.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
                 <div
                   onPointerDown={(e) => {
                     const rect = e.currentTarget.getBoundingClientRect();
                     const x = e.clientX - rect.left;
                     const y = e.clientY - rect.top;
-                    const { size, accepted } = applySampleFromPointer(e);
+                    const { size, accepted, belowPressureCutoff } = applySampleFromPointer(e, 'down');
                     setTestModalDots((prev) => [
                       ...prev.slice(-18),
-                      { id: Date.now() + Math.random(), x, y, pointerType: e.pointerType, size, accepted },
+                      {
+                        id: Date.now() + Math.random(),
+                        x,
+                        y,
+                        pointerType: e.pointerType,
+                        size,
+                        accepted,
+                        belowCutoff: belowPressureCutoff,
+                      },
                     ]);
                   }}
                   onPointerMove={(e) => {
-                    if (e.buttons > 0 || e.pointerType === 'touch') {
+                    if (e.buttons > 0 || e.pressure > 0 || e.pointerType === 'touch') {
                       const metrics = getEffectiveTouchMetrics(e.nativeEvent);
-                      if (metrics.isMeasured) {
-                        const { size, accepted } = applySampleFromPointer(e);
+                      if (e.pointerType === 'pen' || metrics.isMeasured) {
+                        const { size, accepted, belowPressureCutoff } = applySampleFromPointer(e, 'move');
                         const rect = e.currentTarget.getBoundingClientRect();
                         const x = e.clientX - rect.left;
                         const y = e.clientY - rect.top;
@@ -3288,7 +3434,12 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                               next[i].pointerType === e.pointerType &&
                               Math.hypot(next[i].x - x, next[i].y - y) < 48
                             ) {
-                              next[i] = { ...next[i], size, accepted };
+                              next[i] = {
+                                ...next[i],
+                                size,
+                                accepted,
+                                belowCutoff: belowPressureCutoff,
+                              };
                               break;
                             }
                           }
@@ -3303,7 +3454,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   className="relative w-full h-56 rounded-xl border-2 border-dashed border-cyan-400 dark:border-cyan-700 bg-slate-50 dark:bg-slate-950 overflow-hidden cursor-crosshair select-none flex items-center justify-center"
                 >
                   <span className="text-xs text-slate-400 pointer-events-none text-center px-6">
-                    Tap with Stylus or Rest Palm Here — Green = Accepted as Stylus, Red = Rejected
+                    Tap or Write &amp; Lift Stylus Here — Green = Active Ink, Amber = Lift Tail Filtered, Red = Palm Rejected
                   </span>
                   {testModalDots.map((dot) => (
                     <div
@@ -3315,9 +3466,11 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                         height: `${Math.max(18, Math.min(80, dot.size))}px`,
                       }}
                       className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full pointer-events-none border-2 flex items-center justify-center text-[9px] font-mono font-bold ${
-                        dot.accepted
-                          ? 'bg-emerald-500/20 border-emerald-500 text-emerald-700 dark:text-emerald-300'
-                          : 'bg-rose-500/20 border-rose-500 text-rose-700 dark:text-rose-300'
+                        !dot.accepted
+                          ? 'bg-rose-500/20 border-rose-500 text-rose-700 dark:text-rose-300'
+                          : dot.belowCutoff
+                          ? 'bg-amber-500/20 border-amber-500 text-amber-700 dark:text-amber-300'
+                          : 'bg-emerald-500/20 border-emerald-500 text-emerald-700 dark:text-emerald-300'
                       }`}
                     >
                       {dot.pointerType}
@@ -3326,12 +3479,27 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 </div>
 
                 {lastStylusSample && (
-                  <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-100 dark:bg-slate-800/80 text-xs">
-                    <div className="font-mono text-slate-700 dark:text-slate-200 space-x-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-slate-100 dark:bg-slate-800/80 text-xs">
+                    <div className="font-mono tabular-nums text-slate-700 dark:text-slate-200 flex flex-wrap items-center gap-x-3 gap-y-1">
                       <span>Type: <strong>{lastStylusSample.pointerType}</strong></span>
                       <span>Size: <strong>{lastStylusSample.width}×{lastStylusSample.height}px</strong></span>
-                      <span>Pressure: <strong>{lastStylusSample.pressure}</strong></span>
+                      <span>Pressure: <strong>{lastStylusSample.pressure.toFixed(2)}</strong></span>
                       <span>Tilt: <strong>{lastStylusSample.tiltX}°,{lastStylusSample.tiltY}°</strong></span>
+                      <span
+                        className={`font-semibold ${
+                          !lastStylusSample.accepted
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : lastStylusSample.belowPressureCutoff
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-emerald-600 dark:text-emerald-400'
+                        }`}
+                      >
+                        {!lastStylusSample.accepted
+                          ? '✕ Rejected'
+                          : lastStylusSample.belowPressureCutoff
+                          ? `✕ Tail Below Cutoff (< ${currentMinPenPressure.toFixed(2)})`
+                          : '✓ Active Ink'}
+                      </span>
                     </div>
                     {lastStylusSample.pointerType === 'touch' ? (
                       <button
@@ -3348,13 +3516,28 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                         Use This Tap as Passive Stylus (≤{Math.max(8, Math.min(32, Math.max(lastStylusSample.width, lastStylusSample.height, 1) + 6))}px)
                       </button>
                     ) : lastStylusSample.pointerType === 'pen' ? (
-                      <button
-                        type="button"
-                        onClick={() => onUpdateStylusConfig({ detectionMode: 'active_pen' })}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shrink-0"
-                      >
-                        Lock to Active Pen
-                      </button>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const recommended = getRecommendedPenCutoff(lastStylusSample);
+                            onUpdateStylusConfig({
+                              detectionMode: 'active_pen',
+                              minPenPressure: recommended,
+                            });
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-700 text-white font-semibold"
+                        >
+                          Auto-Setup Cutoff ({getRecommendedPenCutoff(lastStylusSample).toFixed(2)})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onUpdateStylusConfig({ detectionMode: 'active_pen' })}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+                        >
+                          Lock to Active Pen
+                        </button>
+                      </div>
                     ) : null}
                   </div>
                 )}
