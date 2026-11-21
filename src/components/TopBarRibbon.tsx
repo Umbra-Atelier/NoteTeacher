@@ -234,6 +234,10 @@ interface TopBarRibbonProps {
   // Mode bar collapse toggle
   isModeBarCollapsed?: boolean;
   onToggleModeBarCollapsed?: () => void;
+
+  // Top mode bar & popup UI scale
+  uiScale?: number;
+  onSetUiScale?: (scale: number) => void;
 }
 
 export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
@@ -340,6 +344,8 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   creatorInfoJustLanded = false,
   isModeBarCollapsed: controlledModeBarCollapsed,
   onToggleModeBarCollapsed,
+  uiScale = 1,
+  onSetUiScale,
 }) => {
   // Fullscreen toggle state synced with browser fullscreen events (standard + WebKit Safari)
   const [isFullscreen, setIsFullscreen] = useState<boolean>(() => {
@@ -1199,7 +1205,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   );
 
   return (
-    <header className="sticky top-0 z-[100] w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-xs select-none overscroll-none touch-pan-x">
+    <header className="ui-scale-target sticky top-0 z-[100] w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 shadow-xs select-none overscroll-none touch-pan-x">
       {/* ROW 1: PERSISTENT TOP UTILITY BAR (File, Undo/Redo, Laser/Spotlight, Paper Type, Save, Brightness, Fullscreen, Info — NEVER collapses) */}
       <div className="relative z-20 flex flex-wrap items-center justify-between px-3 py-1.5 gap-x-2 gap-y-1.5 bg-white/95 dark:bg-slate-900/95 border-b border-slate-100 dark:border-slate-800/80">
         {/* ============================================================== */}
@@ -1670,7 +1676,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
           >
             <div
               onClick={(e) => e.stopPropagation()}
-              className="dcg-do-not-blur relative w-full max-w-4xl my-auto bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[calc(100vh-3rem)]"
+              className="ui-scale-target dcg-do-not-blur relative w-full max-w-4xl my-auto bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[calc((100vh-3rem)/var(--ui-scale,1))] max-w-[calc((100vw-2rem)/var(--ui-scale,1))]"
             >
               {/* TOP HEADER: DUAL TABS (Save & Export vs. Files Explorer) */}
               <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-900/90 select-none">
@@ -3334,6 +3340,49 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 </button>
               </div>
             </div>
+
+            {/* UI SCALE SECTION (Scales top mode bar & popups) */}
+            {onSetUiScale && (
+              <div className="flex items-center gap-2.5 pl-3 ml-1 border-l border-slate-200 dark:border-slate-700">
+                <div
+                  className="flex flex-col gap-0.5 px-2.5 py-1 rounded-lg bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700"
+                  title="Resize buttons & controls in the top mode bar and popups (75%–150%)"
+                >
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-slate-600 dark:text-slate-300 font-medium">
+                    <span>UI Scale</span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        data-testid="touch-ui-scale-value"
+                        className="font-mono tabular-nums font-bold text-cyan-600 dark:text-cyan-400"
+                      >
+                        {Math.round(uiScale * 100)}%
+                      </span>
+                      {Math.abs(uiScale - 1) > 0.001 && (
+                        <button
+                          type="button"
+                          onClick={() => onSetUiScale(1)}
+                          title="Reset UI scale to 100%"
+                          className="px-1 py-0.2 rounded text-[9px] font-semibold bg-slate-200/80 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-cyan-100 hover:text-cyan-800 dark:hover:bg-cyan-900/60 dark:hover:text-cyan-200 transition-colors cursor-pointer"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.75"
+                    max="1.50"
+                    step="0.05"
+                    value={uiScale}
+                    aria-label="UI Scale"
+                    data-testid="touch-ui-scale-slider"
+                    onChange={(e) => onSetUiScale(parseFloat(e.target.value))}
+                    className="w-28 accent-cyan-600 cursor-pointer"
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -3349,7 +3398,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
             >
               <div
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-4"
+                className="ui-scale-target w-full max-w-xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-4 max-h-[calc((100vh-2rem)/var(--ui-scale,1))] max-w-[calc((100vw-2rem)/var(--ui-scale,1))] overflow-y-auto"
               >
                 <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
                   <div>
@@ -3402,8 +3451,12 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 <div
                   onPointerDown={(e) => {
                     const rect = e.currentTarget.getBoundingClientRect();
-                    const x = e.clientX - rect.left;
-                    const y = e.clientY - rect.top;
+                    const cssScaleX =
+                      e.currentTarget.offsetWidth > 0 ? rect.width / e.currentTarget.offsetWidth : 1;
+                    const cssScaleY =
+                      e.currentTarget.offsetHeight > 0 ? rect.height / e.currentTarget.offsetHeight : 1;
+                    const x = (e.clientX - rect.left) / cssScaleX;
+                    const y = (e.clientY - rect.top) / cssScaleY;
                     const { size, accepted, belowPressureCutoff } = applySampleFromPointer(e, 'down');
                     setTestModalDots((prev) => [
                       ...prev.slice(-18),
@@ -3424,8 +3477,12 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                       if (e.pointerType === 'pen' || metrics.isMeasured) {
                         const { size, accepted, belowPressureCutoff } = applySampleFromPointer(e, 'move');
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const x = e.clientX - rect.left;
-                        const y = e.clientY - rect.top;
+                        const cssScaleX =
+                          e.currentTarget.offsetWidth > 0 ? rect.width / e.currentTarget.offsetWidth : 1;
+                        const cssScaleY =
+                          e.currentTarget.offsetHeight > 0 ? rect.height / e.currentTarget.offsetHeight : 1;
+                        const x = (e.clientX - rect.left) / cssScaleX;
+                        const y = (e.clientY - rect.top) / cssScaleY;
                         setTestModalDots((prev) => {
                           if (prev.length === 0) return prev;
                           const next = [...prev];
@@ -3586,14 +3643,16 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 setDraggedPaletteIndex(null);
                 setDragOverPaletteIndex(null);
               }}
-              className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[9999] flex flex-col items-center gap-1.5 animate-bounce select-none pointer-events-auto"
+              className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[9999] pointer-events-auto"
             >
-              <div className="w-16 h-16 rounded-full bg-rose-600/90 text-white flex items-center justify-center shadow-2xl border-4 border-white dark:border-slate-800 hover:bg-rose-700 hover:scale-110 transition-all cursor-pointer">
-                <X className="w-9 h-9 stroke-[3]" />
+              <div className="ui-scale-target flex flex-col items-center gap-1.5 animate-bounce select-none">
+                <div className="w-16 h-16 rounded-full bg-rose-600/90 text-white flex items-center justify-center shadow-2xl border-4 border-white dark:border-slate-800 hover:bg-rose-700 hover:scale-110 transition-all cursor-pointer">
+                  <X className="w-9 h-9 stroke-[3]" />
+                </div>
+                <span className="text-xs font-bold px-3 py-1 bg-slate-900/90 text-white rounded-full shadow-lg backdrop-blur-xs">
+                  Drag here to delete swatch
+                </span>
               </div>
-              <span className="text-xs font-bold px-3 py-1 bg-slate-900/90 text-white rounded-full shadow-lg backdrop-blur-xs">
-                Drag here to delete swatch
-              </span>
             </div>,
             document.body
           )}

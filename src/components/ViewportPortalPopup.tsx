@@ -95,8 +95,8 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
 
     const aRect = anchorEl.getBoundingClientRect();
     const pRect = popupEl.getBoundingClientRect();
-    const popW = Math.max(popupEl.offsetWidth || pRect.width || 0, 40);
-    const popH = Math.max(popupEl.offsetHeight || pRect.height || 0, 24);
+    const popW = Math.max(pRect.width || popupEl.offsetWidth || 0, 40);
+    const popH = Math.max(pRect.height || popupEl.offsetHeight || 0, 24);
 
     // Hide gracefully if anchor is completely offscreen horizontally or vertically beyond generous slack
     const vh = window.innerHeight;
@@ -245,7 +245,7 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
     >
-      {children}
+      <div className="ui-scale-target">{children}</div>
     </div>,
     document.body
   );

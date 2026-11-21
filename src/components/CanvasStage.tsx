@@ -5604,19 +5604,21 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         isVisibleInViewport &&
         typeof document !== 'undefined' &&
         createPortal(
-          <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] bg-indigo-600 text-white px-4 py-2 rounded-full shadow-2xl flex items-center gap-3 animate-bounce max-w-[92vw] pointer-events-auto">
-            <Camera className="w-4 h-4 text-indigo-200 shrink-0" />
-            <span className="text-xs font-bold tracking-wide truncate">
-              Photo snippet ready! Click anywhere on page to place it.
-            </span>
-            <button
-              type="button"
-              onClick={() => setPendingPhotoSnippet(null)}
-              className="p-1 hover:bg-indigo-700 rounded-full shrink-0"
-              title="Cancel"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+          <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] max-w-[92vw] pointer-events-auto">
+            <div className="ui-scale-target bg-indigo-600 text-white px-4 py-2 rounded-full shadow-2xl flex items-center gap-3 animate-bounce">
+              <Camera className="w-4 h-4 text-indigo-200 shrink-0" />
+              <span className="text-xs font-bold tracking-wide truncate">
+                Photo snippet ready! Click anywhere on page to place it.
+              </span>
+              <button
+                type="button"
+                onClick={() => setPendingPhotoSnippet(null)}
+                className="p-1 hover:bg-indigo-700 rounded-full shrink-0"
+                title="Cancel"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>,
           document.body
         )}
@@ -5628,28 +5630,30 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         isVisibleInViewport &&
         typeof document !== 'undefined' &&
         createPortal(
-          <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] bg-blue-600 text-white px-5 py-2.5 rounded-full shadow-2xl flex items-center gap-3 animate-in fade-in max-w-[92vw] pointer-events-auto">
-            <Compass className="w-4 h-4 text-blue-200 shrink-0" />
-            <span className="text-xs font-bold tracking-wide truncate">
-              {angleStep === 'circle_drag' && 'Release pointer to lock circle size'}
-              {angleStep === 'ray1_drag' && 'Drag blue terminal ray to orient 1st direction, then release'}
-              {angleStep === 'ray2_drag' && 'Drag red terminal ray to orient 2nd direction, then release'}
-              {angleStep === 'sector_select' &&
-                (allowNegativeAngles
-                  ? 'Click either angle arc button to keep that angle'
-                  : 'Click either the Acute or Obtuse arc button to keep that angle')}
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                setAngleStep('idle');
-                setAngleCenter(null);
-              }}
-              className="p-1 hover:bg-blue-700 rounded-full transition-colors shrink-0"
-              title="Cancel Angle Tool"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+          <div className="banner-prompt fixed top-20 left-1/2 -translate-x-1/2 z-[10020] max-w-[92vw] pointer-events-auto">
+            <div className="ui-scale-target bg-blue-600 text-white px-5 py-2.5 rounded-full shadow-2xl flex items-center gap-3 animate-in fade-in">
+              <Compass className="w-4 h-4 text-blue-200 shrink-0" />
+              <span className="text-xs font-bold tracking-wide truncate">
+                {angleStep === 'circle_drag' && 'Release pointer to lock circle size'}
+                {angleStep === 'ray1_drag' && 'Drag blue terminal ray to orient 1st direction, then release'}
+                {angleStep === 'ray2_drag' && 'Drag red terminal ray to orient 2nd direction, then release'}
+                {angleStep === 'sector_select' &&
+                  (allowNegativeAngles
+                    ? 'Click either angle arc button to keep that angle'
+                    : 'Click either the Acute or Obtuse arc button to keep that angle')}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setAngleStep('idle');
+                  setAngleCenter(null);
+                }}
+                className="p-1 hover:bg-blue-700 rounded-full transition-colors shrink-0"
+                title="Cancel Angle Tool"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>,
           document.body
         )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Maximize2,
   X,
@@ -139,6 +139,11 @@ const EMPTY_DICTATED: DictatedTextBox[] = [];
 function clampMinPenPressure(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
   return Math.round(Math.max(0, Math.min(0.3, value)) * 100) / 100;
+}
+
+function clampUiScale(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 1;
+  return Math.round(Math.max(0.75, Math.min(1.5, value)) * 20) / 20;
 }
 
 export default function App() {
@@ -355,6 +360,31 @@ export default function App() {
     };
   });
 
+  // UI Scale for top mode bar & popups (75% - 150%)
+  const [uiScale, setUiScaleState] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('noteteacher_ui_scale');
+      if (saved !== null) {
+        const parsed = parseFloat(saved);
+        if (Number.isFinite(parsed)) return clampUiScale(parsed);
+      }
+    } catch {}
+    return 1;
+  });
+
+  const handleSetUiScale = useCallback((nextScale: number) => {
+    const clamped = clampUiScale(nextScale);
+    setUiScaleState(clamped);
+    try {
+      localStorage.setItem('noteteacher_ui_scale', String(clamped));
+    } catch {}
+  }, []);
+
+  useLayoutEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.documentElement.style.setProperty('--ui-scale', String(uiScale));
+  }, [uiScale]);
+
   const handleUpdateStylusConfig = (updated: Partial<StylusDetectionConfig>) => {
     setStylusConfigState((prev) => {
       const next: StylusDetectionConfig = {
@@ -531,6 +561,10 @@ export default function App() {
   const [isFullPovMode, setIsFullPovMode] = useState<boolean>(false);
   const [povZoomFactor, setPovZoomFactor] = useState<number>(1);
   const povPinchRef = useRef<{ initialDist: number; initialZoom: number } | null>(null);
+  const pendingPovScrollAnchorRef = useRef<{
+    pageId: string;
+    anchorFraction: number;
+  } | null>(null);
   const [isBottomAddPageOpen, setIsBottomAddPageOpen] = useState<boolean>(false);
   const bottomAddPageRef = useRef<HTMLDivElement | null>(null);
 
@@ -1211,6 +1245,40 @@ export default function App() {
     },
     [isViewerTab, buildCameraSyncPayload]
   );
+
+  // Re-anchor scrollTop onto the currently viewed page synchronously when toggling Full POV
+  useLayoutEffect(() => {
+    const pending = pendingPovScrollAnchorRef.current;
+    if (!pending) return;
+    const mainEl = mainScrollRef.current;
+    const targetEl = pageRefsMapRef.current.get(pending.pageId);
+    if (!mainEl || !targetEl) return;
+
+    pendingPovScrollAnchorRef.current = null;
+
+    const mRect = mainEl.getBoundingClientRect();
+    const elRect = targetEl.getBoundingClientRect();
+    const elTopInScroll = mainEl.scrollTop + (elRect.top - mRect.top);
+    const elH = elRect.height;
+    const viewH = mainEl.clientHeight;
+
+    let nextScrollTop: number;
+    if (elH <= viewH) {
+      nextScrollTop = elTopInScroll - Math.max(0, (viewH - elH) / 2);
+    } else {
+      const desiredTop = elTopInScroll + pending.anchorFraction * elH - viewH * 0.45;
+      const minPageTop = elTopInScroll - 8;
+      const maxPageTop = Math.max(minPageTop, elTopInScroll + elH - viewH + 8);
+      nextScrollTop = Math.max(minPageTop, Math.min(maxPageTop, desiredTop));
+    }
+
+    const maxScroll = Math.max(0, mainEl.scrollHeight - viewH);
+    mainEl.scrollTop = Math.max(0, Math.min(maxScroll, Math.round(nextScrollTop)));
+    mainEl.scrollLeft = 0;
+
+    computeScrollPageIndicatorNow();
+    syncCameraNow();
+  }, [isFullPovMode, computeScrollPageIndicatorNow, syncCameraNow]);
 
   // Track exact pixel dimensions & POV state of Teacher's active page sheet container
   const isCurrentPageVisible = visiblePageIds.has(currentPageId);
@@ -4333,6 +4401,8 @@ export default function App() {
         creatorInfoJustLanded={creatorInfoJustLanded}
         isModeBarCollapsed={isModeBarCollapsed}
         onToggleModeBarCollapsed={() => setIsModeBarCollapsed((prev) => !prev)}
+        uiScale={uiScale}
+        onSetUiScale={handleSetUiScale}
       />
 
       {/* 2. MAIN VIRTUALIZED WORKSPACE CANVAS (Only viewport-visible pages load; off-screen pages stay blurry placeholders) */}
@@ -4375,12 +4445,65 @@ export default function App() {
         const rightSpacePx = Math.max(0, mainW - pageRightPx);
 
         const handleToggleFullPov = () => {
-          setIsFullPovMode((prev) => {
-            const next = !prev;
-            setPovZoomFactor(1);
-            setIsBottomAddPageOpen(false);
-            return next;
-          });
+          const mainEl = mainScrollRef.current;
+          let targetPage =
+            pages[Math.max(0, Math.min(pages.length - 1, scrollPageNumber - 1))] ||
+            currentPage ||
+            pages[0];
+          let anchorFraction = 0.45;
+
+          if (mainEl && pages.length > 0) {
+            const mRect = mainEl.getBoundingClientRect();
+            const midY = mRect.top + mRect.height * 0.45;
+            let bestDist = Infinity;
+            for (const p of pages) {
+              const el = pageRefsMapRef.current.get(p.id);
+              if (!el) continue;
+              const r = el.getBoundingClientRect();
+              if (r.top <= midY && r.bottom >= midY) {
+                targetPage = p;
+                anchorFraction = r.height > 0 ? Math.max(0, Math.min(1, (midY - r.top) / r.height)) : 0.45;
+                break;
+              }
+              const center = (r.top + r.bottom) / 2;
+              const dist = Math.abs(center - midY);
+              if (dist < bestDist) {
+                bestDist = dist;
+                targetPage = p;
+                anchorFraction = r.height > 0 ? Math.max(0, Math.min(1, (midY - r.top) / r.height)) : 0.45;
+              }
+            }
+          }
+
+          if (targetPage) {
+            pendingPovScrollAnchorRef.current = {
+              pageId: targetPage.id,
+              anchorFraction,
+            };
+            manualScrollLockRef.current = true;
+            if (manualScrollLockTimerRef.current !== null) {
+              window.clearTimeout(manualScrollLockTimerRef.current);
+            }
+            manualScrollLockTimerRef.current = window.setTimeout(() => {
+              manualScrollLockRef.current = false;
+              manualScrollLockTimerRef.current = null;
+            }, 650);
+
+            currentPageIdRef.current = targetPage.id;
+            setCurrentPageId(targetPage.id);
+            setVisiblePageIds((prev) => {
+              const targetIdx = pages.findIndex((p) => p.id === targetPage!.id);
+              const next = new Set(prev);
+              next.add(targetPage!.id);
+              if (targetIdx > 0) next.add(pages[targetIdx - 1].id);
+              if (targetIdx >= 0 && targetIdx < pages.length - 1) next.add(pages[targetIdx + 1].id);
+              return next;
+            });
+          }
+
+          setIsFullPovMode((prev) => !prev);
+          setPovZoomFactor(1);
+          setIsBottomAddPageOpen(false);
         };
 
         return (
@@ -4646,7 +4769,7 @@ export default function App() {
             className="absolute z-40 flex flex-col items-end gap-1.5 select-none"
           >
             {isBottomAddPageOpen && (
-              <div className="mb-1 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-1.5 space-y-0.5">
+              <div className="ui-scale-target mb-1 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-1.5 space-y-0.5">
                 <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
                   Add Page Background
                 </div>
@@ -4875,30 +4998,34 @@ export default function App() {
               : isBottomMicVisible
               ? 'bottom-24'
               : 'bottom-4'
-          } left-1/2 -translate-x-1/2 z-[10006] flex items-center gap-2.5 px-4 py-2.5 rounded-xl shadow-xl border text-xs font-medium max-w-md animate-in fade-in slide-in-from-bottom-2 duration-150 ${
-            appStatusNotice.kind === 'error'
-              ? 'bg-rose-50 dark:bg-rose-950/95 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200'
-              : appStatusNotice.kind === 'success'
-              ? 'bg-emerald-50 dark:bg-emerald-950/95 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
-              : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100'
-          }`}
+          } left-1/2 -translate-x-1/2 z-[10006] pointer-events-auto animate-in fade-in slide-in-from-bottom-2 duration-150`}
         >
-          {appStatusNotice.kind === 'error' ? (
-            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
-          ) : appStatusNotice.kind === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-          ) : (
-            <Loader2 className="w-4 h-4 shrink-0 animate-spin text-blue-600" />
-          )}
-          <span className="truncate">{appStatusNotice.message}</span>
-          <button
-            type="button"
-            onClick={() => setAppStatusNotice(null)}
-            className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10 shrink-0"
-            aria-label="Dismiss notification"
+          <div
+            className={`ui-scale-target flex items-center gap-2.5 px-4 py-2.5 rounded-xl shadow-xl border text-xs font-medium max-w-md ${
+              appStatusNotice.kind === 'error'
+                ? 'bg-rose-50 dark:bg-rose-950/95 border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200'
+                : appStatusNotice.kind === 'success'
+                ? 'bg-emerald-50 dark:bg-emerald-950/95 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100'
+            }`}
           >
-            <X className="w-3.5 h-3.5" />
-          </button>
+            {appStatusNotice.kind === 'error' ? (
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
+            ) : appStatusNotice.kind === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <Loader2 className="w-4 h-4 shrink-0 animate-spin text-blue-600" />
+            )}
+            <span className="truncate">{appStatusNotice.message}</span>
+            <button
+              type="button"
+              onClick={() => setAppStatusNotice(null)}
+              className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10 shrink-0"
+              aria-label="Dismiss notification"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
 

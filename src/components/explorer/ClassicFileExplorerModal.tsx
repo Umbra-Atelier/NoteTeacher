@@ -592,7 +592,7 @@ export const ClassicFileExplorerModal: React.FC<ClassicFileExplorerModalProps> =
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl w-full max-w-5xl h-[86vh] max-h-[820px] flex flex-col overflow-hidden select-none"
+        className="ui-scale-target bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl w-full max-w-5xl h-[calc(86vh/var(--ui-scale,1))] max-h-[calc((100vh-3rem)/var(--ui-scale,1))] max-w-[calc((100vw-2rem)/var(--ui-scale,1))] flex flex-col overflow-hidden select-none"
       >
         {/* 1. TOP HEADER & BREADCRUMBS */}
         <div className="flex flex-col border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 shrink-0">

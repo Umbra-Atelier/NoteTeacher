@@ -448,7 +448,7 @@ export const OnboardingTutorialModal: React.FC<OnboardingTutorialModalProps> = (
         data-testid="tutorial-welcome-modal"
         className="fixed inset-0 z-[10200] bg-slate-950/55 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-150"
       >
-        <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-7 text-slate-900 dark:text-slate-100 space-y-5">
+        <div className="ui-scale-target w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-7 text-slate-900 dark:text-slate-100 space-y-5 max-h-[calc((100vh-2rem)/var(--ui-scale,1))] max-w-[calc((100vw-2rem)/var(--ui-scale,1))] overflow-y-auto">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-sm shrink-0">
@@ -623,10 +623,11 @@ export const OnboardingTutorialModal: React.FC<OnboardingTutorialModalProps> = (
           aria-modal="true"
           data-testid={`tutorial-step-card-${clampedIdx + 1}`}
           style={cardStyle}
-          className={`fixed z-[10210] bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-5 space-y-3.5 transition-opacity duration-200 ${
+          className={`fixed z-[10210] bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 transition-opacity duration-200 ${
             isOutroCollapsingOrFlying ? 'opacity-95' : 'opacity-100'
           }`}
         >
+          <div className="ui-scale-target p-5 space-y-3.5">
           {/* Header Row: Step Counter + Category + Close */}
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
@@ -758,6 +759,7 @@ export const OnboardingTutorialModal: React.FC<OnboardingTutorialModalProps> = (
               </button>
             )}
           </div>
+          </div>
         </div>
       )}
 
@@ -834,7 +836,7 @@ export const CreatorInfoDialog: React.FC<CreatorInfoDialogProps> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-6 text-slate-900 dark:text-slate-100 space-y-4"
+        className="ui-scale-target w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-6 text-slate-900 dark:text-slate-100 space-y-4 max-h-[calc((100vh-2rem)/var(--ui-scale,1))] max-w-[calc((100vw-2rem)/var(--ui-scale,1))] overflow-y-auto"
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">

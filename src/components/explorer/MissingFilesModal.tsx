@@ -29,7 +29,7 @@ export const MissingFilesModal: React.FC<MissingFilesModalProps> = ({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[85vh]"
+        className="ui-scale-target w-full max-w-xl bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[calc(85vh/var(--ui-scale,1))] max-w-[calc((100vw-2rem)/var(--ui-scale,1))]"
       >
         {/* HEADER */}
         <div className="flex items-center justify-between p-4 border-b border-slate-100 dark:border-slate-800 bg-rose-50/50 dark:bg-rose-950/30">

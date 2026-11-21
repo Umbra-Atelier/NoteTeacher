@@ -88,8 +88,9 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
   const recomputePosition = useCallback(() => {
     if (!position || !popupRef.current) return;
     const el = popupRef.current;
-    const w = Math.max(el.offsetWidth || 260, 220);
-    const h = Math.max(el.offsetHeight || 48, 40);
+    const rect = el.getBoundingClientRect();
+    const w = Math.max(rect.width || el.offsetWidth || 260, 220);
+    const h = Math.max(rect.height || el.offsetHeight || 48, 40);
 
     const headerEl = document.querySelector('header');
     const safeTop = headerEl
@@ -242,8 +243,9 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
       onPointerDown={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
-      className="z-[10050] pointer-events-auto flex flex-col items-center animate-in fade-in zoom-in-95 duration-150"
+      className="z-[10050] pointer-events-auto animate-in fade-in zoom-in-95 duration-150"
     >
+      <div className="ui-scale-target flex flex-col items-center">
       {/* EXPANDABLE DROPDOWN THUMBNAIL GRID */}
       {isDropdownOpen && (
         <div
@@ -498,6 +500,7 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
             Keep
           </button>
         </div>
+      </div>
       </div>
     </div>,
     document.body
