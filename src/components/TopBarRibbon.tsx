@@ -91,6 +91,8 @@ import {
   PdfTextAlign,
   PdfTextElement,
   PdfImageElement,
+  WritingGuideConfig,
+  WritingGuideMode,
 } from '../types';
 import { MicPermissionState } from '../utils/speechDictation';
 import { hsvToHex, hexToHsv, hexWithAlphaPercent } from '../utils/colorUtils';
@@ -129,6 +131,8 @@ interface TopBarRibbonProps {
   onSetStrokeWidth: (w: number) => void;
   currentColor: string;
   onSetCurrentColor: (color: string) => void;
+  writingGuideConfig?: WritingGuideConfig;
+  onUpdateWritingGuideConfig?: (updated: Partial<WritingGuideConfig>) => void;
   documentColors: string[];
   paletteColors: string[];
   onUpdatePaletteColors: (cols: string[]) => void;
@@ -310,6 +314,16 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   onSetStrokeWidth,
   currentColor,
   onSetCurrentColor,
+  writingGuideConfig = {
+    enabled: false,
+    quickPaused: false,
+    mode: 'bottom',
+    ignoreEqualsTopBottom: false,
+    thickness: 1.5,
+    opacity: 0.45,
+    color: '#5B7FA6',
+  },
+  onUpdateWritingGuideConfig,
   documentColors,
   paletteColors = [],
   onUpdatePaletteColors,
@@ -537,6 +551,8 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   const [showPresenterToolMenu, setShowPresenterToolMenu] = useState(false);
   const [showTemplateMenu, setShowTemplateMenu] = useState(false);
   const [showAddPageOptions, setShowAddPageOptions] = useState(false);
+  const [showWritingGuideMenu, setShowWritingGuideMenu] = useState(false);
+  const writingGuideAnchorRef = useRef<HTMLDivElement | null>(null);
 
   // PDF Editor formatting popups & font size draft
   const [showPdfFontSizeMenu, setShowPdfFontSizeMenu] = useState(false);
@@ -2593,6 +2609,272 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
             </div>
 
             {renderColorAndPaletteControls()}
+
+            {/* Writing Guidelines Toggle & Options Popover */}
+            <div
+              ref={writingGuideAnchorRef}
+              className="flex items-center pl-2 border-l border-slate-200 dark:border-slate-800"
+            >
+              <div className="flex items-center rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 p-0.5">
+                <button
+                  type="button"
+                  data-testid="drawing-guides-toggle"
+                  onClick={() => {
+                    const nextEnabled = !writingGuideConfig.enabled;
+                    onUpdateWritingGuideConfig?.({ enabled: nextEnabled });
+                    if (nextEnabled) {
+                      setShowWritingGuideMenu(true);
+                    }
+                  }}
+                  title="Toggle auto writing guidelines while handwriting"
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    writingGuideConfig.enabled && !writingGuideConfig.quickPaused
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : writingGuideConfig.enabled && writingGuideConfig.quickPaused
+                      ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300'
+                      : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/70 dark:hover:bg-slate-900/60'
+                  }`}
+                >
+                  <svg
+                    viewBox="0 0 18 18"
+                    className="w-3.5 h-3.5 shrink-0"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M2 15h14" />
+                    <path d="M5 12l4-8 4 8" />
+                    <path d="M6.3 9.5h5.4" />
+                  </svg>
+                  <span>Guides</span>
+                  <span className="text-[10px] font-semibold opacity-90">
+                    {!writingGuideConfig.enabled
+                      ? 'Off'
+                      : writingGuideConfig.quickPaused
+                      ? 'Paused'
+                      : writingGuideConfig.mode === 'top_bottom'
+                      ? 'Top+Btm'
+                      : writingGuideConfig.mode === 'ignore_equals'
+                      ? 'No ='
+                      : 'Bottom'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="drawing-guides-options-btn"
+                  onClick={() => setShowWritingGuideMenu((prev) => !prev)}
+                  title="Guideline mode, thickness, opacity, and color options"
+                  aria-label="Guideline options"
+                  className={`px-1.5 py-1.5 rounded-lg transition-colors shrink-0 ${
+                    showWritingGuideMenu
+                      ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
+                      : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {showWritingGuideMenu && (
+                <AnchoredScreenPopup
+                  anchorRef={writingGuideAnchorRef}
+                  placement="bottom"
+                  align="start"
+                  gap={8}
+                  zIndexClass="z-[9995]"
+                  onClose={() => setShowWritingGuideMenu(false)}
+                >
+                  <div
+                    data-testid="drawing-guides-popover"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="ui-scale-target w-80 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-3.5 space-y-3 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100 dark:border-slate-800">
+                      <span className="font-semibold text-slate-900 dark:text-slate-100 text-sm">
+                        Writing Guidelines
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUpdateWritingGuideConfig?.({
+                            enabled: !writingGuideConfig.enabled,
+                          })
+                        }
+                        className={`px-2.5 py-1 rounded-lg font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                          writingGuideConfig.enabled
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                        }`}
+                      >
+                        {writingGuideConfig.enabled ? 'Enabled' : 'Disabled'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                        Guideline Mode
+                      </div>
+                      <div className="space-y-1">
+                        {(
+                          [
+                            {
+                              id: 'bottom',
+                              title: 'Horizontal Bottom Guide',
+                              desc: 'Follows your first letter down, locks on pen lift, and keeps the same row clear.',
+                            },
+                            {
+                              id: 'top_bottom',
+                              title: 'Top & Bottom Guides',
+                              desc: 'Creates locked guidelines at both the top and bottom of the first letter.',
+                            },
+                            {
+                              id: 'ignore_equals',
+                              title: 'Ignore Equal Signs (=)',
+                              desc: 'Deletes the guide if two horizontal strokes stack (=), then resumes on the next letter.',
+                            },
+                          ] as const
+                        ).map((opt) => {
+                          const isSelected = writingGuideConfig.mode === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              data-testid={`guide-mode-${opt.id}`}
+                              onClick={() =>
+                                onUpdateWritingGuideConfig?.({
+                                  mode: opt.id as WritingGuideMode,
+                                  enabled: true,
+                                })
+                              }
+                              className={`w-full text-left px-2.5 py-2 rounded-lg border transition-colors ${
+                                isSelected
+                                  ? 'bg-blue-50 dark:bg-blue-950/50 border-blue-500 text-blue-900 dark:text-blue-100'
+                                  : 'bg-slate-50/70 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold whitespace-nowrap">{opt.title}</span>
+                                {isSelected && <Check className="w-3.5 h-3.5 text-blue-600 shrink-0" />}
+                              </div>
+                              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                                {opt.desc}
+                              </p>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {writingGuideConfig.mode === 'ignore_equals' && (
+                        <label className="flex items-center gap-2 pt-1 px-1 text-slate-700 dark:text-slate-300 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            data-testid="guide-ignore-equals-top-bottom"
+                            checked={writingGuideConfig.ignoreEqualsTopBottom}
+                            onChange={(e) =>
+                              onUpdateWritingGuideConfig?.({
+                                ignoreEqualsTopBottom: e.target.checked,
+                              })
+                            }
+                            className="accent-blue-600 rounded cursor-pointer"
+                          />
+                          <span className="font-medium">
+                            Also show Top &amp; Bottom guides
+                          </span>
+                        </label>
+                      )}
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-slate-600 dark:text-slate-300">
+                            Thickness
+                          </span>
+                          <span className="font-mono tabular-nums text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                            {writingGuideConfig.thickness.toFixed(1)} px
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          data-testid="guide-thickness-slider"
+                          min="1"
+                          max="6"
+                          step="0.5"
+                          value={writingGuideConfig.thickness}
+                          onChange={(e) =>
+                            onUpdateWritingGuideConfig?.({
+                              thickness: parseFloat(e.target.value),
+                            })
+                          }
+                          className="w-full accent-blue-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-slate-600 dark:text-slate-300">
+                            Transparency (Opacity)
+                          </span>
+                          <span className="font-mono tabular-nums text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                            {Math.round(writingGuideConfig.opacity * 100)}%
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          data-testid="guide-opacity-slider"
+                          min="0.1"
+                          max="1"
+                          step="0.05"
+                          value={writingGuideConfig.opacity}
+                          onChange={(e) =>
+                            onUpdateWritingGuideConfig?.({
+                              opacity: parseFloat(e.target.value),
+                            })
+                          }
+                          className="w-full accent-blue-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-0.5">
+                        <span className="font-medium text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                          Guide Color
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {['#5B7FA6', '#64748B', '#2563EB', '#0D9488', '#D97706', '#DC2626'].map(
+                            (hex) => (
+                              <button
+                                key={hex}
+                                type="button"
+                                onClick={() => onUpdateWritingGuideConfig?.({ color: hex })}
+                                title={`Set guide color ${hex}`}
+                                className={`w-5 h-5 rounded-full border transition-transform ${
+                                  writingGuideConfig.color.toUpperCase() === hex.toUpperCase()
+                                    ? 'border-slate-900 dark:border-white scale-110 ring-2 ring-blue-500/40'
+                                    : 'border-slate-300 dark:border-slate-600 hover:scale-105'
+                                }`}
+                                style={{ backgroundColor: hex }}
+                              />
+                            )
+                          )}
+                          <input
+                            type="color"
+                            data-testid="guide-color-picker"
+                            value={writingGuideConfig.color}
+                            onChange={(e) =>
+                              onUpdateWritingGuideConfig?.({ color: e.target.value })
+                            }
+                            title="Custom guideline color"
+                            className="w-6 h-6 p-0 border border-slate-300 dark:border-slate-600 rounded cursor-pointer bg-transparent"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </AnchoredScreenPopup>
+              )}
+            </div>
           </div>
         )}
 

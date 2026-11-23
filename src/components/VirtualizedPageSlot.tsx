@@ -25,6 +25,7 @@ import {
   ShapeType,
   StylusDetectionConfig,
   TouchInputMode,
+  WritingGuideConfig,
 } from '../types';
 import { CanvasStage } from './CanvasStage';
 import {
@@ -142,6 +143,13 @@ interface VirtualizedPageSlotProps {
   onStartEditGridDims?: (shapeId: string, field: 'cols' | 'rows') => void;
   onChangeGridDimsDraft?: (shapeId: string, field: 'cols' | 'rows', draft: string) => void;
   onStopEditGridDims?: () => void;
+  writingGuideConfig?: WritingGuideConfig;
+  onToggleWritingGuidesQuick?: () => void;
+  onCommitDrawingStroke?: (
+    stroke: CanvasStroke,
+    guideShapesToAdd?: GeometricShape[],
+    shapeIdsToDelete?: string[]
+  ) => void;
   onAddStroke: (stroke: CanvasStroke) => void;
   onAddShape: (shape: GeometricShape) => void;
   onUpdateShape: (id: string, updated: Partial<GeometricShape>) => void;
@@ -286,6 +294,9 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   onStartEditGridDims,
   onChangeGridDimsDraft,
   onStopEditGridDims,
+  writingGuideConfig,
+  onToggleWritingGuidesQuick,
+  onCommitDrawingStroke,
   onAddStroke,
   onAddShape,
   onUpdateShape,
@@ -704,6 +715,9 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
             graphs={pageGraphs}
             calculators={pageCalculators}
             images={pageImages}
+            writingGuideConfig={writingGuideConfig}
+            onToggleWritingGuidesQuick={onToggleWritingGuidesQuick}
+            onCommitDrawingStroke={onCommitDrawingStroke}
             onAddStroke={onAddStroke}
             onAddShape={onAddShape}
             onUpdateShape={onUpdateShape}

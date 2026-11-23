@@ -68,6 +68,18 @@ export type PaperTemplate = 'blank' | 'lined' | 'grid' | 'graph' | 'dotted' | 'p
 
 export type PresenterMode = 'none' | 'laser' | 'spotlight';
 
+export type WritingGuideMode = 'bottom' | 'top_bottom' | 'ignore_equals';
+
+export interface WritingGuideConfig {
+  enabled: boolean;
+  quickPaused: boolean;
+  mode: WritingGuideMode;
+  ignoreEqualsTopBottom: boolean;
+  thickness: number;
+  opacity: number;
+  color: string;
+}
+
 export interface StrokePoint {
   x: number;
   y: number;
@@ -111,6 +123,12 @@ export interface GeometricShape {
   centerY?: number;
   isArrow?: boolean;
   rotation?: number;
+  opacity?: number;
+  isWritingGuide?: boolean;
+  guideGroupId?: string;
+  guideRole?: 'bottom' | 'top';
+  guideBandTop?: number;
+  guideBandBottom?: number;
 }
 
 export interface LiveStrokePreview {
@@ -175,6 +193,14 @@ export interface LiveCanvasOverlay {
   angle?: LiveAnglePreview | null;
   dictatePreview?: LiveDictatePreview | null;
   pdfTextPreview?: LivePdfTextPreview | null;
+  writingGuides?: {
+    pageId: string;
+    topY?: number;
+    bottomY: number;
+    color: string;
+    thickness: number;
+    opacity: number;
+  } | null;
 }
 
 export interface LivePresenterToolState {

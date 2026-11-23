@@ -226,6 +226,9 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
     };
   }, [anchorRef, recomputePosition]);
 
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!onClose) return;
     const handlePointerDown = (e: PointerEvent) => {
@@ -233,11 +236,12 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
       if (!target) return;
       if (popupRef.current?.contains(target)) return;
       if (anchorRef.current?.contains(target)) return;
-      onClose();
+      onCloseRef.current?.();
     };
-    document.addEventListener('pointerdown', handlePointerDown);
-    return () => document.removeEventListener('pointerdown', handlePointerDown);
-  }, [onClose, anchorRef]);
+    document.addEventListener('pointerdown', handlePointerDown, { capture: true });
+    return () =>
+      document.removeEventListener('pointerdown', handlePointerDown, { capture: true });
+  }, [Boolean(onClose), anchorRef]);
 
   if (typeof document === 'undefined') return null;
 

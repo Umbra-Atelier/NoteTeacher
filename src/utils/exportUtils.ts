@@ -571,7 +571,7 @@ function drawVectorShape(
     ctx.strokeStyle = '#EF4444';
     ctx.setLineDash([8 * avgScale, 6 * avgScale]);
   } else {
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = sh.opacity ?? 1;
     ctx.strokeStyle = sh.strokeColor;
     if (sh.strokeStyle === 'dashed') ctx.setLineDash([8 * avgScale, 6 * avgScale]);
     else if (sh.strokeStyle === 'dotted') ctx.setLineDash([3 * avgScale, 4 * avgScale]);

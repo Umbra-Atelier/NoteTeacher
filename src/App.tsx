@@ -51,6 +51,7 @@ import {
   PdfTextAlign,
   PdfTextElement,
   PdfImageElement,
+  WritingGuideConfig,
 } from './types';
 import { extractNativePdfPageElements } from './utils/pdfNativeExtractor';
 import { useSpeechDictation } from './utils/speechDictation';
@@ -438,6 +439,98 @@ export default function App() {
 
   // Graph opacity
   const [graphOpacity, setGraphOpacity] = useState<number>(0.95);
+
+  // Draw Mode Writing Guidelines config
+  const [writingGuideConfig, setWritingGuideConfig] = useState<WritingGuideConfig>(() => {
+    try {
+      const saved = localStorage.getItem('noteteacher_writing_guide_config');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') {
+          return {
+            enabled: Boolean(parsed.enabled),
+            quickPaused: Boolean(parsed.quickPaused),
+            mode:
+              parsed.mode === 'top_bottom' || parsed.mode === 'ignore_equals'
+                ? parsed.mode
+                : 'bottom',
+            ignoreEqualsTopBottom: Boolean(parsed.ignoreEqualsTopBottom),
+            thickness:
+              typeof parsed.thickness === 'number' && parsed.thickness >= 1 && parsed.thickness <= 8
+                ? parsed.thickness
+                : 1.5,
+            opacity:
+              typeof parsed.opacity === 'number' && parsed.opacity >= 0.05 && parsed.opacity <= 1
+                ? parsed.opacity
+                : 0.45,
+            color: typeof parsed.color === 'string' && parsed.color ? parsed.color : '#5B7FA6',
+          };
+        }
+      }
+    } catch {}
+    return {
+      enabled: false,
+      quickPaused: false,
+      mode: 'bottom',
+      ignoreEqualsTopBottom: false,
+      thickness: 1.5,
+      opacity: 0.45,
+      color: '#5B7FA6',
+    };
+  });
+
+  const handleUpdateWritingGuideConfig = useCallback((updated: Partial<WritingGuideConfig>) => {
+    setWritingGuideConfig((prev) => {
+      const next: WritingGuideConfig = {
+        ...prev,
+        ...updated,
+        quickPaused:
+          updated.quickPaused !== undefined
+            ? updated.quickPaused
+            : updated.enabled === true && !prev.enabled
+            ? false
+            : prev.quickPaused,
+      };
+      try {
+        localStorage.setItem('noteteacher_writing_guide_config', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+
+    if (
+      updated.thickness !== undefined ||
+      updated.opacity !== undefined ||
+      updated.color !== undefined
+    ) {
+      setShapes((prev) => {
+        let anyUpdated = false;
+        const next = prev.map((sh) => {
+          if (!sh.isWritingGuide) return sh;
+          anyUpdated = true;
+          return {
+            ...sh,
+            strokeWidth: updated.thickness ?? sh.strokeWidth,
+            opacity: updated.opacity ?? sh.opacity,
+            strokeColor: updated.color ?? sh.strokeColor,
+          };
+        });
+        return anyUpdated ? next : prev;
+      });
+    }
+  }, []);
+
+  const handleToggleWritingGuidesQuick = useCallback(() => {
+    setWritingGuideConfig((prev) => {
+      const next: WritingGuideConfig = {
+        ...prev,
+        quickPaused: !prev.quickPaused,
+      };
+      try {
+        localStorage.setItem('noteteacher_writing_guide_config', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
 
   // Document Pages & Canvas Data
   const [pages, setPages] = useState<PageData[]>(INITIAL_PAGES);
@@ -2315,6 +2408,29 @@ export default function App() {
     setStrokes((prev) => [...prev, stroke]);
   };
 
+  const handleCommitDrawingStroke = (
+    stroke: CanvasStroke,
+    guideShapesToAdd?: GeometricShape[],
+    shapeIdsToDelete?: string[]
+  ) => {
+    saveSnapshot();
+    setStrokes((prev) => [...prev, stroke]);
+    if (
+      (guideShapesToAdd && guideShapesToAdd.length > 0) ||
+      (shapeIdsToDelete && shapeIdsToDelete.length > 0)
+    ) {
+      setShapes((prev) => {
+        const delSet =
+          shapeIdsToDelete && shapeIdsToDelete.length > 0 ? new Set(shapeIdsToDelete) : null;
+        let next = delSet ? prev.filter((sh) => !delSet.has(sh.id)) : prev;
+        if (guideShapesToAdd && guideShapesToAdd.length > 0) {
+          next = [...next, ...guideShapesToAdd];
+        }
+        return next;
+      });
+    }
+  };
+
   const handleAddShape = (shape: GeometricShape) => {
     saveSnapshot();
     setShapes((prev) => [...prev, shape]);
@@ -2766,6 +2882,10 @@ export default function App() {
           ...sh,
           x: sh.x + dx,
           y: sh.y + dy,
+          guideBandTop:
+            sh.guideBandTop !== undefined ? sh.guideBandTop + dy : undefined,
+          guideBandBottom:
+            sh.guideBandBottom !== undefined ? sh.guideBandBottom + dy : undefined,
           points: sh.points
             ? sh.points.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy }))
             : undefined,
@@ -4925,6 +5045,8 @@ export default function App() {
         onSetStrokeWidth={handleSetStrokeWidth}
         currentColor={currentColor}
         onSetCurrentColor={handleSetCurrentColor}
+        writingGuideConfig={writingGuideConfig}
+        onUpdateWritingGuideConfig={handleUpdateWritingGuideConfig}
         documentColors={documentColors}
         paletteColors={paletteColors}
         onUpdatePaletteColors={handleUpdatePaletteColors}
@@ -5367,6 +5489,9 @@ export default function App() {
                 graphs={graphsByPage.get(page.id) ?? EMPTY_GRAPHS}
                 calculators={calculatorsByPage.get(page.id) ?? EMPTY_CALCULATORS}
                 images={imagesByPage.get(page.id) ?? EMPTY_IMAGES}
+                writingGuideConfig={writingGuideConfig}
+                onToggleWritingGuidesQuick={handleToggleWritingGuidesQuick}
+                onCommitDrawingStroke={handleCommitDrawingStroke}
                 onAddStroke={handleAddStroke}
                 onAddShape={handleAddShape}
                 onUpdateShape={handleUpdateShape}

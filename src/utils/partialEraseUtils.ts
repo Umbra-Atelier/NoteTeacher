@@ -611,6 +611,12 @@ export function circleErasePage(
           fillColor: 'transparent',
           strokeWidth: sh.strokeWidth,
           strokeStyle: sh.strokeStyle,
+          opacity: sh.opacity,
+          isWritingGuide: sh.isWritingGuide,
+          guideGroupId: sh.guideGroupId,
+          guideRole: sh.guideRole,
+          guideBandTop: sh.guideBandTop,
+          guideBandBottom: sh.guideBandBottom,
           isGhosted: run.inside,
         });
       }

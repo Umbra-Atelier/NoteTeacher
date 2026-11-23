@@ -1057,7 +1057,7 @@ function drawNoteTeacherVectorOverlays(
     } else if (sh.type === 'line' || sh.type === 'arrow' || sh.type === 'double_arrow') {
       const p1 = toPt(sh.x, sh.y);
       const p2 = toPt(sh.x + sh.width, sh.y + sh.height);
-      page.drawLine({ start: p1, end: p2, thickness: lineW, color: strokeCol });
+      page.drawLine({ start: p1, end: p2, thickness: lineW, color: strokeCol, opacity: sh.opacity ?? 1 });
     } else if (sh.type === 'polyline' && sh.points && sh.points.length > 1) {
       for (let i = 1; i < sh.points.length; i++) {
         page.drawLine({
@@ -1065,6 +1065,7 @@ function drawNoteTeacherVectorOverlays(
           end: toPt(sh.points[i].x, sh.points[i].y),
           thickness: lineW,
           color: strokeCol,
+          opacity: sh.opacity ?? 1,
         });
       }
     }

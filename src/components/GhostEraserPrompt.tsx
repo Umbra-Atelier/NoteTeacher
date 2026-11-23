@@ -382,6 +382,7 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
                         x2={sh.x + sh.width}
                         y2={sh.y + sh.height}
                         stroke={sh.strokeColor}
+                        strokeOpacity={sh.opacity ?? 1}
                         strokeWidth={Math.max(2, sh.strokeWidth)}
                       />
                     )}
@@ -397,6 +398,7 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
                                 .join(' ')
                         }
                         stroke={sh.strokeColor}
+                        strokeOpacity={sh.opacity ?? 1}
                         strokeWidth={Math.max(2, sh.strokeWidth)}
                         fill="none"
                         strokeLinecap="round"

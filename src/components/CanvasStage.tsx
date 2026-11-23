@@ -30,6 +30,7 @@ import {
   PdfTextAlign,
   PdfTextElement,
   PdfImageElement,
+  WritingGuideConfig,
 } from '../types';
 import { DesmosGraphBox } from './DesmosGraphBox';
 import { ScientificCalculatorBox, CALC_BASE_WIDTH, CALC_BASE_HEIGHT } from './ScientificCalculatorBox';
@@ -67,6 +68,7 @@ import {
   Camera,
   MousePointer,
   Hand,
+  Trash2,
 } from 'lucide-react';
 
 interface CanvasStageProps {
@@ -203,6 +205,13 @@ interface CanvasStageProps {
   onStartEditGridDims?: (shapeId: string, field: 'cols' | 'rows') => void;
   onChangeGridDimsDraft?: (shapeId: string, field: 'cols' | 'rows', draft: string) => void;
   onStopEditGridDims?: () => void;
+  writingGuideConfig?: WritingGuideConfig;
+  onToggleWritingGuidesQuick?: () => void;
+  onCommitDrawingStroke?: (
+    stroke: CanvasStroke,
+    guideShapesToAdd?: GeometricShape[],
+    shapeIdsToDelete?: string[]
+  ) => void;
   onAddStroke: (stroke: CanvasStroke) => void;
   onAddShape: (shape: GeometricShape) => void;
   onUpdateShape?: (id: string, updated: Partial<GeometricShape>) => void;
@@ -479,6 +488,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   onStartEditGridDims,
   onChangeGridDimsDraft,
   onStopEditGridDims,
+  writingGuideConfig,
+  onToggleWritingGuidesQuick,
+  onCommitDrawingStroke,
   onAddStroke,
   onAddShape,
   onUpdateShape,
@@ -508,16 +520,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   // Zoom & Pan state (Two-finger pinch-to-zoom centered on finger midpoint)
   const [zoomScale, setZoomScale] = useState<number>(1);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const zoomControlRef = useRef<HTMLDivElement>(null);
-  const [isZoomControlActive, setIsZoomControlActive] = useState<boolean>(false);
+  const activeZoomScale = isAudienceViewer ? externalZoomScale ?? 1 : zoomScale;
+  const activePanOffset = isAudienceViewer ? externalPanOffset ?? { x: 0, y: 0 } : panOffset;
   const [floatingZoomCoords, setFloatingZoomCoords] = useState<{
     right: number;
     bottom: number;
     visible: boolean;
-  }>({ right: 14, bottom: 14, visible: true });
-
-  const activeZoomScale = externalZoomScale ?? zoomScale;
-  const activePanOffset = externalPanOffset ?? panOffset;
+  }>({ right: 14, bottom: 14, visible: false });
+  const [isZoomControlActive, setIsZoomControlActive] = useState<boolean>(false);
+  const zoomControlRef = useRef<HTMLDivElement>(null);
+  const [isGuideQuickActive, setIsGuideQuickActive] = useState<boolean>(false);
+  const guideQuickRef = useRef<HTMLDivElement>(null);
 
   // Return bottom-right zoom controls to transparent when clicking outside
   useEffect(() => {
@@ -532,6 +545,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       window.removeEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
     };
   }, [isZoomControlActive]);
+
+  // Return bottom-left quick guides toggle to transparent when clicking outside
+  useEffect(() => {
+    if (!isGuideQuickActive) return;
+    const handleOutsidePointerDown = (e: PointerEvent) => {
+      if (guideQuickRef.current && !guideQuickRef.current.contains(e.target as Node)) {
+        setIsGuideQuickActive(false);
+      }
+    };
+    window.addEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
+    };
+  }, [isGuideQuickActive]);
 
   // Keep bottom-right zoom controls anchored on-screen in the exact same fixed viewport corner across Regular & Full POV
   const recomputeFloatingZoomCoords = useCallback(() => {
@@ -1104,6 +1131,19 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const [selectedCalcId, setSelectedCalcId] = useState<string | null>(null);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [selectedGridShapeId, setSelectedGridShapeId] = useState<string | null>(null);
+  const [selectedLineShapeId, setSelectedLineShapeId] = useState<string | null>(null);
+  const lineDragRef = useRef<{
+    shapeId: string;
+    mode: 'move' | 'start' | 'end';
+    startStageX: number;
+    startStageY: number;
+    origX: number;
+    origY: number;
+    origW: number;
+    origH: number;
+    origBandTop?: number;
+    origBandBottom?: number;
+  } | null>(null);
 
   // Filter items for current page (memoized to prevent downstream re-render loops)
   const pageStrokes = useMemo(
@@ -1114,6 +1154,75 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     () => shapes.filter((sh) => sh.pageId === pageId),
     [shapes, pageId]
   );
+
+  // Draw Mode Writing Guidelines live tracking state & refs
+  const [liveGuidePreview, setLiveGuidePreview] = useState<{
+    topY?: number;
+    bottomY: number;
+  } | null>(null);
+  const writingGuideConfigRef = useRef(writingGuideConfig);
+  writingGuideConfigRef.current = writingGuideConfig;
+  const pageShapesRef = useRef(pageShapes);
+  pageShapesRef.current = pageShapes;
+  const onCommitDrawingStrokeRef = useRef(onCommitDrawingStroke);
+  onCommitDrawingStrokeRef.current = onCommitDrawingStroke;
+  const onAddStrokeRef = useRef(onAddStroke);
+  onAddStrokeRef.current = onAddStroke;
+
+  const activeGuideTrackRef = useRef<{
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    showTop: boolean;
+  } | null>(null);
+
+  const lastEqualCandidateRef = useRef<{
+    pageId: string;
+    guideGroupId: string;
+    shapeIds: string[];
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+  } | null>(null);
+
+  const isStrokeRoughlyHorizontal = (
+    minX: number,
+    maxX: number,
+    minY: number,
+    maxY: number
+  ): boolean => {
+    const dx = maxX - minX;
+    const dy = maxY - minY;
+    return dx >= 10 && dy <= Math.max(8, dx * 0.28);
+  };
+
+  const areEqualSignPair = (
+    a: { minX: number; maxX: number; minY: number; maxY: number },
+    b: { minX: number; maxX: number; minY: number; maxY: number }
+  ): boolean => {
+    if (
+      !isStrokeRoughlyHorizontal(a.minX, a.maxX, a.minY, a.maxY) ||
+      !isStrokeRoughlyHorizontal(b.minX, b.maxX, b.minY, b.maxY)
+    ) {
+      return false;
+    }
+    const aW = a.maxX - a.minX;
+    const bW = b.maxX - b.minX;
+    const overlapX = Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX);
+    const minW = Math.max(1, Math.min(aW, bW));
+    const aCx = (a.minX + a.maxX) / 2;
+    const bCx = (b.minX + b.maxX) / 2;
+    const horizAligned =
+      overlapX / minW >= 0.35 || Math.abs(aCx - bCx) <= Math.max(14, Math.max(aW, bW) * 0.45);
+    if (!horizAligned) return false;
+
+    const aCy = (a.minY + a.maxY) / 2;
+    const bCy = (b.minY + b.maxY) / 2;
+    const vertDist = Math.abs(bCy - aCy);
+    return vertDist >= 3 && vertDist <= 56;
+  };
   const pageGraphs = useMemo(
     () => graphs.filter((g) => g.pageId === pageId),
     [graphs, pageId]
@@ -1384,7 +1493,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         onActivatePage();
       }
       onColorUsed(currentColor);
-      onAddStroke({
+
+      const strokeObj: CanvasStroke = {
         id: strokeId,
         pageId,
         tool: penType,
@@ -1392,7 +1502,135 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         width: strokeWidth,
         opacity: penType === 'highlighter' ? 0.35 : 1,
         points: pts,
-      });
+      };
+
+      const guideTrack = activeGuideTrackRef.current;
+      activeGuideTrackRef.current = null;
+      setLiveGuidePreview(null);
+
+      const gCfg = writingGuideConfigRef.current;
+      const guidesCurrentlyActive =
+        Boolean(gCfg?.enabled && !gCfg?.quickPaused) && penType !== 'eraser';
+
+      let guideShapesToAdd: GeometricShape[] | undefined;
+      let shapeIdsToDelete: string[] | undefined;
+
+      // Compute full stroke bounds
+      let sMinX = Infinity;
+      let sMaxX = -Infinity;
+      let sMinY = Infinity;
+      let sMaxY = -Infinity;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i];
+        if (p.x < sMinX) sMinX = p.x;
+        if (p.x > sMaxX) sMaxX = p.x;
+        if (p.y < sMinY) sMinY = p.y;
+        if (p.y > sMaxY) sMaxY = p.y;
+      }
+
+      if (guidesCurrentlyActive && pts.length > 0 && Number.isFinite(sMinY)) {
+        const cand = lastEqualCandidateRef.current;
+        const strokeBounds = { minX: sMinX, maxX: sMaxX, minY: sMinY, maxY: sMaxY };
+
+        if (
+          gCfg?.mode === 'ignore_equals' &&
+          cand &&
+          cand.pageId === pageId &&
+          areEqualSignPair(cand, strokeBounds)
+        ) {
+          // Two stacked horizontal strokes (=) detected: remove the equal sign's guideline(s)
+          const existingIds = new Set(pageShapesRef.current.map((sh) => sh.id));
+          const toDel = cand.shapeIds.filter((id) => existingIds.has(id));
+          if (toDel.length > 0) {
+            shapeIdsToDelete = toDel;
+          }
+          lastEqualCandidateRef.current = null;
+        } else {
+          lastEqualCandidateRef.current = null;
+
+          if (guideTrack && gCfg) {
+            const pageW = Math.max(
+              100,
+              interactionLayerRef.current?.clientWidth || stageDims.width || 612
+            );
+            const letterH = Math.max(0, sMaxY - sMinY);
+            const topPad = Math.max(14, Math.min(36, letterH * 0.35));
+            const bottomPad = Math.max(14, Math.min(34, letterH * 0.35));
+            const bandTop = sMinY - topPad;
+            const bandBottom = sMaxY + bottomPad;
+            const guideGroupId = `guidegrp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            const bottomId = `guide-b-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+            const created: GeometricShape[] = [
+              {
+                id: bottomId,
+                type: 'line',
+                pageId,
+                x: 0,
+                y: sMaxY,
+                width: pageW,
+                height: 0,
+                strokeColor: gCfg.color || '#5B7FA6',
+                strokeWidth: gCfg.thickness || 1.5,
+                strokeStyle: 'solid',
+                opacity: gCfg.opacity ?? 0.45,
+                isWritingGuide: true,
+                guideGroupId,
+                guideRole: 'bottom',
+                guideBandTop: bandTop,
+                guideBandBottom: bandBottom,
+              },
+            ];
+
+            if (guideTrack.showTop) {
+              const topId = `guide-t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              created.push({
+                id: topId,
+                type: 'line',
+                pageId,
+                x: 0,
+                y: sMinY,
+                width: pageW,
+                height: 0,
+                strokeColor: gCfg.color || '#5B7FA6',
+                strokeWidth: gCfg.thickness || 1.5,
+                strokeStyle: 'solid',
+                opacity: gCfg.opacity ?? 0.45,
+                isWritingGuide: true,
+                guideGroupId,
+                guideRole: 'top',
+                guideBandTop: bandTop,
+                guideBandBottom: bandBottom,
+              });
+            }
+
+            guideShapesToAdd = created;
+
+            if (
+              gCfg.mode === 'ignore_equals' &&
+              isStrokeRoughlyHorizontal(sMinX, sMaxX, sMinY, sMaxY)
+            ) {
+              lastEqualCandidateRef.current = {
+                pageId,
+                guideGroupId,
+                shapeIds: created.map((c) => c.id),
+                minX: sMinX,
+                maxX: sMaxX,
+                minY: sMinY,
+                maxY: sMaxY,
+              };
+            }
+          }
+        }
+      } else {
+        lastEqualCandidateRef.current = null;
+      }
+
+      if (onCommitDrawingStrokeRef.current) {
+        onCommitDrawingStrokeRef.current(strokeObj, guideShapesToAdd, shapeIdsToDelete);
+      } else {
+        onAddStrokeRef.current(strokeObj);
+      }
 
       if (strokeMeta?.pointerType === 'touch') {
         const vp = zoomPanRef.current;
@@ -1426,6 +1664,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         }
       }, 64);
     } else {
+      activeGuideTrackRef.current = null;
+      setLiveGuidePreview(null);
       clearLiveCanvas();
     }
   };
@@ -1719,6 +1959,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       selPayload.imageIds = [selectedImageId];
     } else if (selectedGridShapeId) {
       selPayload.shapeIds = [selectedGridShapeId];
+    } else if (selectedLineShapeId) {
+      selPayload.shapeIds = [selectedLineShapeId];
     } else if (selectedDictateBoxId) {
       selPayload.dictateIds = [selectedDictateBoxId];
     }
@@ -1734,10 +1976,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     selectedCalcId,
     selectedImageId,
     selectedGridShapeId,
+    selectedLineShapeId,
     selectedDictateBoxId,
     isAudienceViewer,
     isActivePage,
   ]);
+
+  useEffect(() => {
+    if (mode !== 'edit' && selectedLineShapeId) {
+      setSelectedLineShapeId(null);
+    }
+  }, [mode, selectedLineShapeId]);
+
+  useEffect(() => {
+    if (selectedLineShapeId && !pageShapes.some((sh) => sh.id === selectedLineShapeId)) {
+      setSelectedLineShapeId(null);
+    }
+  }, [pageShapes, selectedLineShapeId]);
 
   // Calculate coordinates on the stage, accurately accounting for zoom scale and pan offset
   const getStageCoords = useCallback(
@@ -1790,6 +2045,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           isDrawingRef.current = false;
           currentPointsRef.current = [];
           renderedPointCountRef.current = 0;
+          activeGuideTrackRef.current = null;
+          setLiveGuidePreview(null);
           stopLiveStrokeStream();
           clearLiveCanvas();
           if (lastLiveOverlaySentNonNullRef.current && onLiveOverlayChange && !isAudienceViewer) {
@@ -2492,6 +2749,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       for (const sh of pageShapes) {
         if (sh.isGhosted || sh.type === 'grid') continue;
         ctx.save();
+        ctx.globalAlpha = sh.opacity ?? 1;
         ctx.strokeStyle = sh.strokeColor || '#000000';
         ctx.lineWidth = (sh.strokeWidth || 2) * activeZoomScale;
         if (sh.strokeStyle === 'dashed') ctx.setLineDash([8 * activeZoomScale, 6 * activeZoomScale]);
@@ -3162,6 +3420,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         setSelectedGridShapeId(null);
         onStopEditGridDims?.();
       }
+      if (selectedLineShapeId) setSelectedLineShapeId(null);
       if (selectedGraphId) setSelectedGraphId(null);
       if (selectedCalcId) setSelectedCalcId(null);
       if (selectedImageId) setSelectedImageId(null);
@@ -3212,6 +3471,53 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
       lastCommittedBridgeRef.current = null;
 
+      // Initialize dynamic Writing Guidelines tracking if active and stroke starts outside existing row bands
+      const gCfg = writingGuideConfigRef.current;
+      if (gCfg?.enabled && !gCfg.quickPaused && penType !== 'eraser' && initialPts.length > 0) {
+        const startY = initialPts[0].y;
+        const inExistingBand = pageShapesRef.current.some((sh) => {
+          if (!sh.isWritingGuide || sh.isGhosted) return false;
+          if (typeof sh.guideBandTop === 'number' && typeof sh.guideBandBottom === 'number') {
+            return startY >= sh.guideBandTop && startY <= sh.guideBandBottom;
+          }
+          return Math.abs(startY - sh.y) <= 20;
+        });
+
+        if (!inExistingBand) {
+          let gMinX = Infinity;
+          let gMaxX = -Infinity;
+          let gMinY = Infinity;
+          let gMaxY = -Infinity;
+          for (let i = 0; i < initialPts.length; i++) {
+            const p = initialPts[i];
+            if (p.x < gMinX) gMinX = p.x;
+            if (p.x > gMaxX) gMaxX = p.x;
+            if (p.y < gMinY) gMinY = p.y;
+            if (p.y > gMaxY) gMaxY = p.y;
+          }
+          const showTop =
+            gCfg.mode === 'top_bottom' ||
+            (gCfg.mode === 'ignore_equals' && gCfg.ignoreEqualsTopBottom);
+          activeGuideTrackRef.current = {
+            minX: gMinX,
+            maxX: gMaxX,
+            minY: gMinY,
+            maxY: gMaxY,
+            showTop,
+          };
+          setLiveGuidePreview({
+            topY: showTop ? gMinY : undefined,
+            bottomY: gMaxY,
+          });
+        } else {
+          activeGuideTrackRef.current = null;
+          setLiveGuidePreview(null);
+        }
+      } else {
+        activeGuideTrackRef.current = null;
+        setLiveGuidePreview(null);
+      }
+
       pendingLiveCanvasClearRef.current = false;
       clearLiveCanvas();
       activeStrokeMetaRef.current = {
@@ -3236,6 +3542,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           if (!isDrawingRef.current || currentPointsRef.current.length < 1) return;
           liveOverlayThrottleRef.current = Date.now();
           lastLiveOverlaySentNonNullRef.current = true;
+          const gt = activeGuideTrackRef.current;
+          const cfg = writingGuideConfigRef.current;
           onLiveOverlayChange({
             stroke: {
               pageId,
@@ -3245,6 +3553,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               opacity: penType === 'highlighter' ? 0.35 : 1,
               points: currentPointsRef.current.slice(),
             },
+            writingGuides:
+              gt && cfg
+                ? {
+                    pageId,
+                    topY: gt.showTop ? gt.minY : undefined,
+                    bottomY: gt.maxY,
+                    color: cfg.color,
+                    thickness: cfg.thickness,
+                    opacity: cfg.opacity,
+                  }
+                : null,
             shape: null,
             graphMarquee: null,
             angle: null,
@@ -3330,6 +3649,29 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
       if (pts.length > prevCount) {
         drawIncrementalLivePoints(pts, currentColor, strokeWidth);
+        const track = activeGuideTrackRef.current;
+        if (track) {
+          let changed = false;
+          for (let i = prevCount; i < pts.length; i++) {
+            const pt = pts[i];
+            if (pt.x < track.minX) track.minX = pt.x;
+            if (pt.x > track.maxX) track.maxX = pt.x;
+            if (pt.y < track.minY) {
+              track.minY = pt.y;
+              changed = true;
+            }
+            if (pt.y > track.maxY) {
+              track.maxY = pt.y;
+              changed = true;
+            }
+          }
+          if (changed) {
+            setLiveGuidePreview({
+              topY: track.showTop ? track.minY : undefined,
+              bottomY: track.maxY,
+            });
+          }
+        }
       }
     },
     [getStageCoords, drawIncrementalLivePoints, currentColor, strokeWidth, cleanupGuiltyTouchArtifacts]
@@ -3713,7 +4055,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       );
 
       const isFullyContained = shMinX >= minX && shMaxX <= maxX && shMinY >= minY && shMaxY <= maxY;
-      const isTouching = !(shMaxX < minX || shMinX > maxX || shMaxY < minY || shMinY > maxY);
+      const padY = sh.type === 'line' && shMaxY - shMinY < 6 ? 6 : 0;
+      const isTouching = !(
+        shMaxX < minX ||
+        shMinX > maxX ||
+        shMaxY + padY < minY ||
+        shMinY - padY > maxY
+      );
 
       if (modeFilter === 'contained') {
         if (isFullyContained) selShapeIds.push(sh.id);
@@ -3942,15 +4290,32 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               ghostedShapeIds.push(sh.id);
             }
           } else {
-            const aabb = getRotatedBoxAabb(sh.x, sh.y, sh.width, sh.height, sh.rotation || 0);
-            const overlaps = !(
-              aabb.maxX < minX ||
-              aabb.minX > maxX ||
-              aabb.maxY < minY ||
-              aabb.minY > maxY
-            );
-            if (overlaps) {
-              ghostedShapeIds.push(sh.id);
+            const isPointClick =
+              Math.abs(maxX - minX) < 6 && Math.abs(maxY - minY) < 6;
+            if (
+              isPointClick &&
+              (sh.type === 'line' || sh.type === 'arrow' || sh.type === 'double_arrow')
+            ) {
+              const d = distToSegment(
+                { x: (minX + maxX) / 2, y: (minY + maxY) / 2 },
+                { x: sh.x, y: sh.y },
+                { x: sh.x + sh.width, y: sh.y + sh.height }
+              );
+              if (d <= Math.max(12, (sh.strokeWidth || 2) / 2 + 10)) {
+                ghostedShapeIds.push(sh.id);
+              }
+            } else {
+              const aabb = getRotatedBoxAabb(sh.x, sh.y, sh.width, sh.height, sh.rotation || 0);
+              const padY = sh.type === 'line' && aabb.maxY - aabb.minY < 6 ? 6 : 0;
+              const overlaps = !(
+                aabb.maxX < minX ||
+                aabb.minX > maxX ||
+                aabb.maxY + padY < minY ||
+                aabb.minY - padY > maxY
+              );
+              if (overlaps) {
+                ghostedShapeIds.push(sh.id);
+              }
             }
           }
         });
@@ -4454,15 +4819,42 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
     // (Legacy Edit eraser blocks unified above under `if (isAnyEraseActive)`)
 
-    // EDIT MODE: MAGIC GRAB LASSO COMMIT
+    // EDIT MODE: MAGIC GRAB LASSO / CLICK-TO-SELECT LINE COMMIT
     if (mode === 'edit' && isMagicGrabActive && lassoStart && lassoCurrent) {
       const minX = Math.min(lassoStart.x, lassoCurrent.x);
       const maxX = Math.max(lassoStart.x, lassoCurrent.x);
       const minY = Math.min(lassoStart.y, lassoCurrent.y);
       const maxY = Math.max(lassoStart.y, lassoCurrent.y);
+      const dragDist = Math.hypot(lassoCurrent.x - lassoStart.x, lassoCurrent.y - lassoStart.y);
 
       setLassoStart(null);
       setLassoCurrent(null);
+
+      // Single click / tap near a line (e.g. writing guideline or regular line shape) selects it directly for editing & deletion
+      if (dragDist < 6) {
+        let bestLine: GeometricShape | null = null;
+        let bestDist = Infinity;
+        for (let i = pageShapes.length - 1; i >= 0; i--) {
+          const sh = pageShapes[i];
+          if (sh.isGhosted || sh.type !== 'line') continue;
+          const tol = Math.max(14, (sh.strokeWidth || 2) / 2 + 11);
+          const d = distToSegment(
+            { x, y },
+            { x: sh.x, y: sh.y },
+            { x: sh.x + sh.width, y: sh.y + sh.height }
+          );
+          if (d <= tol && d < bestDist) {
+            bestDist = d;
+            bestLine = sh;
+          }
+        }
+        if (bestLine) {
+          setGrabSelection(null);
+          setSelectedLineShapeId(bestLine.id);
+          return;
+        }
+      }
+      setSelectedLineShapeId(null);
 
       const { selStrokeIds, selShapeIds, selGraphIds, selCalcIds, selImageIds, selDictateIds } =
         filterItemsByLassoMode(minX, minY, maxX, maxY, magicGrabMode);
@@ -5623,7 +6015,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     const strokeColor = sh.isGhosted ? '#EF4444' : sh.strokeColor;
     const strokeDash =
       sh.strokeStyle === 'dashed' ? '8 6' : sh.strokeStyle === 'dotted' ? '3 4' : undefined;
-    const opacity = sh.isGhosted ? 0.3 : 1;
+    const opacity = sh.isGhosted ? 0.3 : (sh.opacity ?? 1);
 
     if (sh.type === 'arc') {
       const cx = sh.centerX ?? (sh.x + sh.width / 2);
@@ -6989,6 +7381,59 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               )}
             </g>
           )}
+
+          {/* Active Live Draw Mode Writing Guide Preview */}
+          {!isAudienceViewer && liveGuidePreview && (
+            <g data-testid="live-writing-guide-preview">
+              {liveGuidePreview.topY !== undefined && (
+                <line
+                  x1={0}
+                  y1={liveGuidePreview.topY}
+                  x2={stageDims.width || 850}
+                  y2={liveGuidePreview.topY}
+                  stroke={writingGuideConfig?.color || '#5B7FA6'}
+                  strokeWidth={writingGuideConfig?.thickness || 1.5}
+                  opacity={writingGuideConfig?.opacity ?? 0.45}
+                />
+              )}
+              <line
+                x1={0}
+                y1={liveGuidePreview.bottomY}
+                x2={stageDims.width || 850}
+                y2={liveGuidePreview.bottomY}
+                stroke={writingGuideConfig?.color || '#5B7FA6'}
+                strokeWidth={writingGuideConfig?.thickness || 1.5}
+                opacity={writingGuideConfig?.opacity ?? 0.45}
+              />
+            </g>
+          )}
+
+          {isAudienceViewer &&
+            externalLiveOverlay?.writingGuides &&
+            externalLiveOverlay.writingGuides.pageId === pageId && (
+              <g>
+                {externalLiveOverlay.writingGuides.topY !== undefined && (
+                  <line
+                    x1={0}
+                    y1={externalLiveOverlay.writingGuides.topY}
+                    x2={stageDims.width || 850}
+                    y2={externalLiveOverlay.writingGuides.topY}
+                    stroke={externalLiveOverlay.writingGuides.color}
+                    strokeWidth={externalLiveOverlay.writingGuides.thickness}
+                    opacity={externalLiveOverlay.writingGuides.opacity}
+                  />
+                )}
+                <line
+                  x1={0}
+                  y1={externalLiveOverlay.writingGuides.bottomY}
+                  x2={stageDims.width || 850}
+                  y2={externalLiveOverlay.writingGuides.bottomY}
+                  stroke={externalLiveOverlay.writingGuides.color}
+                  strokeWidth={externalLiveOverlay.writingGuides.thickness}
+                  opacity={externalLiveOverlay.writingGuides.opacity}
+                />
+              </g>
+            )}
         </svg>
 
         {/* 2.5 IMMEDIATE-MODE 2D CANVAS INKING BUFFER (Zero React re-renders during active strokes) */}
@@ -7412,6 +7857,280 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             )}
           </>
         )}
+
+        {/* 7.2 EDIT MODE CLICK-SELECTED LINE / GUIDELINE HANDLES & QUICK INSPECTOR */}
+        {!isAudienceViewer &&
+          mode === 'edit' &&
+          selectedLineShapeId &&
+          (() => {
+            const selLine = pageShapes.find(
+              (sh) => sh.id === selectedLineShapeId && sh.type === 'line'
+            );
+            if (!selLine) return null;
+            const x1 = selLine.x;
+            const y1 = selLine.y;
+            const x2 = selLine.x + selLine.width;
+            const y2 = selLine.y + selLine.height;
+            const midX = (x1 + x2) / 2;
+            const midY = (y1 + y2) / 2;
+            const barTop = Math.max(12, Math.min((stageDims.height || 1000) - 56, midY - 46));
+            const barLeft = Math.max(
+              140,
+              Math.min((stageDims.width || 850) - 140, midX)
+            );
+
+            const beginLineDrag = (
+              dragMode: 'move' | 'start' | 'end',
+              e: React.PointerEvent
+            ) => {
+              e.stopPropagation();
+              if (e.button !== 0 && e.pointerType === 'mouse') return;
+              onTransformEnd?.();
+              const startStage = getStageCoords(e.clientX, e.clientY);
+              lineDragRef.current = {
+                shapeId: selLine.id,
+                mode: dragMode,
+                startStageX: startStage.x,
+                startStageY: startStage.y,
+                origX: selLine.x,
+                origY: selLine.y,
+                origW: selLine.width,
+                origH: selLine.height,
+                origBandTop: selLine.guideBandTop,
+                origBandBottom: selLine.guideBandBottom,
+              };
+
+              const onWinMove = (ev: PointerEvent) => {
+                const drag = lineDragRef.current;
+                if (!drag || !onUpdateShape) return;
+                const cur = getStageCoords(ev.clientX, ev.clientY);
+                const dx = cur.x - drag.startStageX;
+                const dy = cur.y - drag.startStageY;
+                if (drag.mode === 'move') {
+                  const patch: Partial<GeometricShape> = {
+                    x: drag.origX + dx,
+                    y: drag.origY + dy,
+                  };
+                  if (typeof drag.origBandTop === 'number') {
+                    patch.guideBandTop = drag.origBandTop + dy;
+                  }
+                  if (typeof drag.origBandBottom === 'number') {
+                    patch.guideBandBottom = drag.origBandBottom + dy;
+                  }
+                  onUpdateShape(drag.shapeId, patch);
+                } else if (drag.mode === 'start') {
+                  const end2X = drag.origX + drag.origW;
+                  const end2Y = drag.origY + drag.origH;
+                  const nextX1 = drag.origX + dx;
+                  const nextY1 = drag.origY + dy;
+                  const minY = Math.min(nextY1, end2Y);
+                  const maxY = Math.max(nextY1, end2Y);
+                  onUpdateShape(drag.shapeId, {
+                    x: nextX1,
+                    y: nextY1,
+                    width: end2X - nextX1,
+                    height: end2Y - nextY1,
+                    ...(selLine.isWritingGuide
+                      ? { guideBandTop: minY - 16, guideBandBottom: maxY + 16 }
+                      : {}),
+                  });
+                } else {
+                  const nextW = drag.origW + dx;
+                  const nextH = drag.origH + dy;
+                  const end2Y = drag.origY + nextH;
+                  const minY = Math.min(drag.origY, end2Y);
+                  const maxY = Math.max(drag.origY, end2Y);
+                  onUpdateShape(drag.shapeId, {
+                    width: nextW,
+                    height: nextH,
+                    ...(selLine.isWritingGuide
+                      ? { guideBandTop: minY - 16, guideBandBottom: maxY + 16 }
+                      : {}),
+                  });
+                }
+              };
+
+              const onWinUp = () => {
+                lineDragRef.current = null;
+                window.removeEventListener('pointermove', onWinMove);
+                window.removeEventListener('pointerup', onWinUp);
+                window.removeEventListener('pointercancel', onWinUp);
+              };
+
+              window.addEventListener('pointermove', onWinMove);
+              window.addEventListener('pointerup', onWinUp);
+              window.addEventListener('pointercancel', onWinUp);
+            };
+
+            return (
+              <div
+                data-testid="selected-line-editor"
+                className="absolute inset-0 pointer-events-none z-[46]"
+              >
+                <svg className="absolute inset-0 w-full h-full overflow-visible pointer-events-none">
+                  {/* Selection highlight line */}
+                  <line
+                    x1={x1}
+                    y1={y1}
+                    x2={x2}
+                    y2={y2}
+                    stroke="#2563EB"
+                    strokeWidth={Math.max(3, (selLine.strokeWidth || 1.5) + 2)}
+                    strokeDasharray="6 4"
+                    opacity={0.85}
+                  />
+                  {/* Wide hit strip for dragging the line body */}
+                  <line
+                    x1={x1}
+                    y1={y1}
+                    x2={x2}
+                    y2={y2}
+                    stroke="transparent"
+                    strokeWidth={22}
+                    className="pointer-events-auto cursor-move touch-none"
+                    onPointerDown={(e) => beginLineDrag('move', e)}
+                  />
+                  {/* Start endpoint handle */}
+                  <circle
+                    cx={x1}
+                    cy={y1}
+                    r={7}
+                    fill="#FFFFFF"
+                    stroke="#2563EB"
+                    strokeWidth={2.5}
+                    className="pointer-events-auto cursor-grab active:cursor-grabbing touch-none"
+                    onPointerDown={(e) => beginLineDrag('start', e)}
+                  />
+                  {/* End endpoint handle */}
+                  <circle
+                    cx={x2}
+                    cy={y2}
+                    r={7}
+                    fill="#FFFFFF"
+                    stroke="#2563EB"
+                    strokeWidth={2.5}
+                    className="pointer-events-auto cursor-grab active:cursor-grabbing touch-none"
+                    onPointerDown={(e) => beginLineDrag('end', e)}
+                  />
+                </svg>
+
+                {/* Compact floating inspector bar */}
+                <div
+                  onPointerDown={(e) => e.stopPropagation()}
+                  style={{
+                    left: `${barLeft}px`,
+                    top: `${barTop}px`,
+                  }}
+                  className="ui-scale-target absolute -translate-x-1/2 pointer-events-auto flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-white/95 dark:bg-slate-900/95 border border-slate-200 dark:border-slate-700 shadow-xl text-xs whitespace-nowrap select-none"
+                >
+                  <button
+                    type="button"
+                    onPointerDown={(e) => beginLineDrag('move', e)}
+                    title="Drag to move line"
+                    className="p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-move"
+                  >
+                    <Move className="w-3.5 h-3.5" />
+                  </button>
+
+                  <div className="flex items-center gap-1 px-1.5 border-l border-slate-200 dark:border-slate-700">
+                    <span className="text-[11px] text-slate-500">Width</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onTransformEnd?.();
+                        onUpdateShape?.(selLine.id, {
+                          strokeWidth: Math.max(1, Number(((selLine.strokeWidth || 1.5) - 0.5).toFixed(1))),
+                        });
+                      }}
+                      className="w-5 h-5 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-bold"
+                    >
+                      -
+                    </button>
+                    <span className="font-mono tabular-nums text-[11px] w-7 text-center">
+                      {(selLine.strokeWidth || 1.5).toFixed(1)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onTransformEnd?.();
+                        onUpdateShape?.(selLine.id, {
+                          strokeWidth: Math.min(12, Number(((selLine.strokeWidth || 1.5) + 0.5).toFixed(1))),
+                        });
+                      }}
+                      className="w-5 h-5 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-bold"
+                    >
+                      +
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-1 px-1.5 border-l border-slate-200 dark:border-slate-700">
+                    <span className="text-[11px] text-slate-500">Opacity</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onTransformEnd?.();
+                        onUpdateShape?.(selLine.id, {
+                          opacity: Math.max(0.1, Number((((selLine.opacity ?? 1) - 0.1)).toFixed(2))),
+                        });
+                      }}
+                      className="w-5 h-5 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-bold"
+                    >
+                      -
+                    </button>
+                    <span className="font-mono tabular-nums text-[11px] w-8 text-center">
+                      {Math.round((selLine.opacity ?? 1) * 100)}%
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onTransformEnd?.();
+                        onUpdateShape?.(selLine.id, {
+                          opacity: Math.min(1, Number((((selLine.opacity ?? 1) + 0.1)).toFixed(2))),
+                        });
+                      }}
+                      className="w-5 h-5 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-bold"
+                    >
+                      +
+                    </button>
+                  </div>
+
+                  <input
+                    type="color"
+                    value={selLine.strokeColor || '#5B7FA6'}
+                    onChange={(e) => {
+                      onTransformEnd?.();
+                      onUpdateShape?.(selLine.id, { strokeColor: e.target.value });
+                    }}
+                    title="Change line color"
+                    className="w-5 h-5 p-0 border border-slate-300 dark:border-slate-600 rounded cursor-pointer bg-transparent"
+                  />
+
+                  <button
+                    type="button"
+                    data-testid="selected-line-delete-btn"
+                    onClick={() => {
+                      onDeleteShape?.(selLine.id);
+                      setSelectedLineShapeId(null);
+                    }}
+                    title="Delete line"
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/60 hover:bg-rose-600 text-rose-600 hover:text-white font-semibold transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSelectedLineShapeId(null)}
+                    title="Deselect line"
+                    className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
         {/* 7.5 ACTIVE ANGLE TOOL SECTOR SELECT & LIVE DISPLAY OVERLAY (At z-50 above interaction layer) */}
         {mode === 'geometric' && shapeType === 'angle' && (angleStep === 'ray2_drag' || angleStep === 'sector_select') && angleCenter && (() => {
           const formatAngleVal = (spanRad: number, isNegDeg: boolean, isNegRad: boolean) => {
@@ -7836,6 +8555,78 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 <span>Reset</span>
               </button>
             )}
+          </div>,
+          document.body
+        )}
+
+      {/* 8.8 BOTTOM-LEFT TRANSPARENT WRITING GUIDELINES QUICK TOGGLE (Portaled in Drawing mode when guides are turned on) */}
+      {!isAudienceViewer &&
+        isActivePage &&
+        isVisibleInViewport &&
+        mode === 'drawing' &&
+        writingGuideConfig?.enabled &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={guideQuickRef}
+            data-testid="bottom-left-guides-toggle-wrap"
+            style={{ touchAction: 'none' }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              setIsGuideQuickActive(true);
+            }}
+            onTouchStart={(e) => e.stopPropagation()}
+            className={`fixed bottom-4 left-4 z-[9991] pointer-events-auto select-none transition-opacity duration-150 rounded-xl border ${
+              isGuideQuickActive
+                ? 'opacity-100 bg-white/95 dark:bg-slate-900/95 border-slate-200 dark:border-slate-700 shadow-lg backdrop-blur-md'
+                : 'opacity-25 hover:opacity-75 bg-transparent border-transparent shadow-none'
+            }`}
+          >
+            <button
+              type="button"
+              data-testid="bottom-left-guides-toggle"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsGuideQuickActive(true);
+                onToggleWritingGuidesQuick?.();
+              }}
+              title="Quick toggle writing guidelines on or off (preserves chosen mode)"
+              className={`min-h-[40px] flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                !writingGuideConfig.quickPaused
+                  ? isGuideQuickActive
+                    ? 'text-blue-700 dark:text-blue-300'
+                    : 'text-slate-700 dark:text-slate-200'
+                  : isGuideQuickActive
+                  ? 'text-slate-600 dark:text-slate-400'
+                  : 'text-slate-500 dark:text-slate-400'
+              }`}
+            >
+              <svg
+                viewBox="0 0 18 18"
+                className="w-4 h-4 shrink-0"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M2 15h14" />
+                <path d="M5 12l4-8 4 8" />
+                <path d="M6.3 9.5h5.4" />
+                {writingGuideConfig.quickPaused && <path d="M2.5 2.5l13 13" />}
+              </svg>
+              <span>
+                {writingGuideConfig.quickPaused ? 'Guides: Off' : 'Guides: On'}
+              </span>
+              <span className="text-[11px] font-medium opacity-75">
+                ·{' '}
+                {writingGuideConfig.mode === 'top_bottom'
+                  ? 'Top & Bottom'
+                  : writingGuideConfig.mode === 'ignore_equals'
+                  ? 'Ignore ='
+                  : 'Bottom'}
+              </span>
+            </button>
           </div>,
           document.body
         )}

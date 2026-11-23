@@ -300,6 +300,7 @@ export async function renderLowResPageCompositePreview(
   for (const sh of shapes) {
     if (sh.isGhosted) continue;
     ctx.save();
+    ctx.globalAlpha = sh.opacity ?? 1;
     ctx.strokeStyle = sh.strokeColor || '#2563EB';
     ctx.lineWidth = Math.max(1, (sh.strokeWidth || 2) * avgScale);
     const sx = Math.min(sh.x, sh.x + sh.width) * scaleX;
