@@ -7,6 +7,8 @@ import {
   CanvasImage,
   DictatedTextBox,
   PageData,
+  PdfImageElement,
+  PdfTextElement,
   SaveAsMode,
 } from '../types';
 import {
@@ -18,7 +20,8 @@ import {
   getRecordedPageStageSize,
   syncLiveDesmosBoxes,
 } from './widgetSnapshotCache';
-import { resolvePdfPageDataUrl } from './pdfPageCache';
+import { getPdfRawBytes, resolvePdfPageDataUrl } from './pdfPageCache';
+import { buildNativeEditedPdfBlob } from './pdfNativeWriter';
 
 export interface ProjectData {
   version: string;
@@ -30,6 +33,8 @@ export interface ProjectData {
   calculators: CalculatorBox[];
   images?: CanvasImage[];
   dictatedTextBoxes?: DictatedTextBox[];
+  pdfTextElements?: PdfTextElement[];
+  pdfImageElements?: PdfImageElement[];
 }
 
 export async function buildProjectJsonBlob(
@@ -39,7 +44,9 @@ export async function buildProjectJsonBlob(
   graphs: DesmosBox[],
   calculators: CalculatorBox[],
   images: CanvasImage[] = [],
-  dictatedTextBoxes: DictatedTextBox[] = []
+  dictatedTextBoxes: DictatedTextBox[] = [],
+  pdfTextElements: PdfTextElement[] = [],
+  pdfImageElements: PdfImageElement[] = []
 ): Promise<Blob> {
   const syncedGraphs = syncLiveDesmosBoxes(graphs);
   const resolvedPages = await Promise.all(
@@ -62,6 +69,8 @@ export async function buildProjectJsonBlob(
     calculators,
     images,
     dictatedTextBoxes,
+    pdfTextElements,
+    pdfImageElements,
   };
 
   const json = JSON.stringify(data, null, 2);
@@ -238,7 +247,9 @@ export async function exportProjectJson(
   images: CanvasImage[] = [],
   suggestedName?: string,
   existingHandle?: FileSystemFileHandle,
-  dictatedTextBoxes: DictatedTextBox[] = []
+  dictatedTextBoxes: DictatedTextBox[] = [],
+  pdfTextElements: PdfTextElement[] = [],
+  pdfImageElements: PdfImageElement[] = []
 ): Promise<SaveExecutionResult> {
   const finalFilename = getDefaultSaveFileName('project_json', pages, undefined, suggestedName);
 
@@ -255,7 +266,9 @@ export async function exportProjectJson(
           graphs,
           calculators,
           images,
-          dictatedTextBoxes
+          dictatedTextBoxes,
+          pdfTextElements,
+          pdfImageElements
         );
         const writable = await existingHandle.createWritable();
         await writable.write(blob);
@@ -292,7 +305,9 @@ export async function exportProjectJson(
         graphs,
         calculators,
         images,
-        dictatedTextBoxes
+        dictatedTextBoxes,
+        pdfTextElements,
+        pdfImageElements
       );
       const writable = await handle.createWritable();
       await writable.write(blob);
@@ -1265,6 +1280,113 @@ function drawDictatedTextBox(
  * guaranteeing exact per-page aspect ratio, paper/PDF background, placed images,
  * real frozen Desmos & Calculator snapshots, geometric shapes, dictated text, and ink strokes.
  */
+async function drawPdfTextLayerItem(
+  ctx: CanvasRenderingContext2D,
+  el: PdfTextElement,
+  targetWidth: number,
+  targetHeight: number,
+  pagePdfWidth?: number
+) {
+  if (!el.text.trim()) return;
+  const x = el.nx * targetWidth;
+  const y = el.ny * targetHeight;
+  const w = Math.max(20, el.nw * targetWidth);
+  const h = Math.max(12, el.nh * targetHeight);
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const ptScale = targetWidth / Math.max(1, pagePdfWidth || 612);
+  const fontSize = Math.max(6, (el.fontSizePt || 14) * ptScale);
+  const lineH = fontSize * 1.15;
+  const fontStack =
+    el.fontFamily === 'TimesRoman'
+      ? '"Times New Roman", Georgia, serif'
+      : el.fontFamily === 'Courier'
+      ? '"Courier New", monospace'
+      : 'Helvetica, Arial, sans-serif';
+
+  ctx.save();
+  if (el.rotation) {
+    ctx.translate(cx, cy);
+    ctx.rotate((el.rotation * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
+  ctx.font = `${el.italic ? 'italic ' : ''}${el.bold ? '700 ' : '400 '}${fontSize}px ${fontStack}`;
+  ctx.fillStyle = el.color || '#000000';
+  ctx.strokeStyle = el.color || '#000000';
+  ctx.textBaseline = 'top';
+
+  const padX = 2 * ptScale;
+  const maxW = Math.max(10, w - padX * 2);
+  const paragraphs = el.text.split('\n');
+  const lines: string[] = [];
+  for (const para of paragraphs) {
+    if (!el.wrap) {
+      lines.push(para);
+      continue;
+    }
+    const words = para.split(' ');
+    let cur = '';
+    for (const wd of words) {
+      const test = cur ? `${cur} ${wd}` : wd;
+      if (ctx.measureText(test).width <= maxW || !cur) {
+        cur = test;
+      } else {
+        lines.push(cur);
+        cur = wd;
+      }
+    }
+    lines.push(cur);
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    const lw = ctx.measureText(ln).width;
+    let lx = x + padX;
+    if (el.align === 'center') lx = x + (w - lw) / 2;
+    else if (el.align === 'right') lx = x + w - padX - lw;
+    const ly = y + i * lineH;
+    ctx.fillText(ln, lx, ly);
+    if (el.underline && lw > 0) {
+      ctx.lineWidth = Math.max(1, fontSize * 0.065);
+      ctx.beginPath();
+      ctx.moveTo(lx, ly + fontSize * 0.96);
+      ctx.lineTo(lx + lw, ly + fontSize * 0.96);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+async function drawPdfImageLayerItem(
+  ctx: CanvasRenderingContext2D,
+  el: PdfImageElement,
+  targetWidth: number,
+  targetHeight: number
+) {
+  const img = await loadImageSafe(el.dataUrl);
+  if (!img || !img.naturalWidth || !img.naturalHeight) return;
+  const x = el.nx * targetWidth;
+  const y = el.ny * targetHeight;
+  const w = Math.max(8, el.nw * targetWidth);
+  const h = Math.max(8, el.nh * targetHeight);
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const crop = el.crop || { top: 0, right: 0, bottom: 0, left: 0 };
+  const sx = Math.max(0, crop.left * img.naturalWidth);
+  const sy = Math.max(0, crop.top * img.naturalHeight);
+  const sw = Math.max(1, (1 - crop.left - crop.right) * img.naturalWidth);
+  const sh = Math.max(1, (1 - crop.top - crop.bottom) * img.naturalHeight);
+
+  ctx.save();
+  if (el.rotation) {
+    ctx.translate(cx, cy);
+    ctx.rotate((el.rotation * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
+  ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+  ctx.restore();
+}
+
 async function renderPageToCanvas(
   page: PageData,
   stageContainer: HTMLElement,
@@ -1274,7 +1396,9 @@ async function renderPageToCanvas(
   calculators: CalculatorBox[],
   images: CanvasImage[],
   isClean: boolean,
-  dictatedTextBoxes: DictatedTextBox[] = []
+  dictatedTextBoxes: DictatedTextBox[] = [],
+  pdfTextElements: PdfTextElement[] = [],
+  pdfImageElements: PdfImageElement[] = []
 ): Promise<HTMLCanvasElement> {
   const { stageWidth, stageHeight } = resolvePageStageDimensions(page, stageContainer);
 
@@ -1388,6 +1512,42 @@ async function renderPageToCanvas(
     }
   }
 
+  // 2.5 Mask modified/deleted native PDF elements and render edited/added native PDF elements
+  const pagePdfTexts = pdfTextElements.filter((t) => t.pageId === page.id);
+  const pagePdfImages = pdfImageElements.filter((im) => im.pageId === page.id);
+  for (const t of pagePdfTexts) {
+    if (t.origin === 'native' && (t.status === 'edited' || t.status === 'deleted') && t.originalBounds) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(
+        t.originalBounds.nx * targetWidth - 2,
+        t.originalBounds.ny * targetHeight - 2,
+        t.originalBounds.nw * targetWidth + 4,
+        t.originalBounds.nh * targetHeight + 4
+      );
+    }
+  }
+  for (const im of pagePdfImages) {
+    if (im.origin === 'native' && (im.status === 'edited' || im.status === 'deleted') && im.originalBounds) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(
+        im.originalBounds.nx * targetWidth - 2,
+        im.originalBounds.ny * targetHeight - 2,
+        im.originalBounds.nw * targetWidth + 4,
+        im.originalBounds.nh * targetHeight + 4
+      );
+    }
+  }
+  for (const im of pagePdfImages) {
+    if (im.status === 'deleted') continue;
+    if (im.origin === 'native' && im.status === 'unmodified') continue;
+    await drawPdfImageLayerItem(ctx, im, targetWidth, targetHeight);
+  }
+  for (const t of pagePdfTexts) {
+    if (t.status === 'deleted') continue;
+    if (t.origin === 'native' && t.status === 'unmodified') continue;
+    await drawPdfTextLayerItem(ctx, t, targetWidth, targetHeight, page.pdfWidth);
+  }
+
   const pageImages = images.filter((img) => img.pageId === page.id);
   const pageShapes = shapes.filter((sh) => sh.pageId === page.id);
   const pageStrokes = strokes.filter((s) => s.pageId === page.id);
@@ -1464,7 +1624,9 @@ export async function executeSaveAs(
   images: CanvasImage[] = [],
   suggestedFilename?: string,
   existingHandle?: FileSystemFileHandle,
-  dictatedTextBoxes: DictatedTextBox[] = []
+  dictatedTextBoxes: DictatedTextBox[] = [],
+  pdfTextElements: PdfTextElement[] = [],
+  pdfImageElements: PdfImageElement[] = []
 ): Promise<SaveExecutionResult> {
   const defaultFileName = getDefaultSaveFileName(mode, pages, currentPageId, suggestedFilename);
 
@@ -1485,7 +1647,9 @@ export async function executeSaveAs(
           currentPageId,
           images,
           existingHandle.name,
-          dictatedTextBoxes
+          dictatedTextBoxes,
+          pdfTextElements,
+          pdfImageElements
         );
         const writable = await existingHandle.createWritable();
         await writable.write(blob);
@@ -1527,7 +1691,9 @@ export async function executeSaveAs(
         currentPageId,
         images,
         handle.name,
-        dictatedTextBoxes
+        dictatedTextBoxes,
+        pdfTextElements,
+        pdfImageElements
       );
       const writable = await handle.createWritable();
       await writable.write(blob);
@@ -1576,7 +1742,9 @@ export async function buildSaveAsBlob(
   currentPageId?: string,
   images: CanvasImage[] = [],
   existingFileName?: string,
-  dictatedTextBoxes: DictatedTextBox[] = []
+  dictatedTextBoxes: DictatedTextBox[] = [],
+  pdfTextElements: PdfTextElement[] = [],
+  pdfImageElements: PdfImageElement[] = []
 ): Promise<{ blob: Blob; fileName: string; mimeType: string }> {
   const dateStr = new Date().toISOString().slice(0, 10);
   if (mode === 'project_json') {
@@ -1587,7 +1755,9 @@ export async function buildSaveAsBlob(
       graphs,
       calculators,
       images,
-      dictatedTextBoxes
+      dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements
     );
     const fileName = existingFileName || `NoteTeacher_Project_${dateStr}.noteteacher`;
     return { blob, fileName, mimeType: 'application/json' };
@@ -1608,7 +1778,9 @@ export async function buildSaveAsBlob(
       calculators,
       images,
       isClean,
-      dictatedTextBoxes
+      dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements
     );
     const blob = await new Promise<Blob>((resolve, reject) => {
       canvas.toBlob(
@@ -1624,6 +1796,33 @@ export async function buildSaveAsBlob(
   }
 
   const firstPage = pages[0];
+  const hasNativePdfOrEditorElements =
+    pages.some((p) => p.template === 'pdf' && Boolean(getPdfRawBytes(p.pdfSourceId))) ||
+    pdfTextElements.length > 0 ||
+    pdfImageElements.length > 0;
+
+  if (hasNativePdfOrEditorElements) {
+    const pdfBlob = await buildNativeEditedPdfBlob({
+      pages,
+      pdfTextElements,
+      pdfImageElements,
+      strokes,
+      shapes,
+      graphs,
+      calculators,
+      images,
+      dictatedTextBoxes,
+      stageContainer: containerElement,
+      isClean,
+    });
+    const docTitle = (firstPage.title || 'Worksheet').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const fileName =
+      existingFileName && existingFileName.toLowerCase().endsWith('.pdf')
+        ? existingFileName
+        : `NoteTeacher_${docTitle}_${suffix}_${dateStr}.pdf`;
+    return { blob: pdfBlob, fileName, mimeType: 'application/pdf' };
+  }
+
   const firstCanvas = await renderPageToCanvas(
     firstPage,
     containerElement,
@@ -1633,7 +1832,9 @@ export async function buildSaveAsBlob(
     calculators,
     images,
     isClean,
-    dictatedTextBoxes
+    dictatedTextBoxes,
+    pdfTextElements,
+    pdfImageElements
   );
 
   const pdfWidthPt = (firstCanvas.width / 2) * 0.75;
@@ -1658,7 +1859,9 @@ export async function buildSaveAsBlob(
       calculators,
       images,
       isClean,
-      dictatedTextBoxes
+      dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements
     );
     const pageW = (pageCanvas.width / 2) * 0.75;
     const pageH = (pageCanvas.height / 2) * 0.75;

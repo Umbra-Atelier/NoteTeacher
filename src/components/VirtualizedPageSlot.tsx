@@ -15,6 +15,11 @@ import {
   LivePresenterToolState,
   MagicGrabMode,
   PageData,
+  PdfEditorTool,
+  PdfFontFamily,
+  PdfImageElement,
+  PdfTextAlign,
+  PdfTextElement,
   PenType,
   PresenterMode,
   ShapeType,
@@ -75,6 +80,24 @@ interface VirtualizedPageSlotProps {
   isDictating?: boolean;
   editingGridDims?: { shapeId: string; field: 'cols' | 'rows'; draft: string } | null;
 
+  // PDF Editor mode props
+  pdfEditorTool?: PdfEditorTool;
+  pdfDefaultTextStyle?: {
+    fontSizePt: number;
+    fontFamily: PdfFontFamily;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    color: string;
+    align: PdfTextAlign;
+    wrap: boolean;
+  };
+  pdfTextElements?: PdfTextElement[];
+  pdfImageElements?: PdfImageElement[];
+  selectedPdfTextId?: string | null;
+  editingPdfTextId?: string | null;
+  selectedPdfImageId?: string | null;
+
   // Document or pre-grouped per-page element collections
   strokes: CanvasStroke[];
   shapes: GeometricShape[];
@@ -105,6 +128,17 @@ interface VirtualizedPageSlotProps {
   onStopManualEditDictateBox?: () => void;
   onClickOutsideDictateBox?: () => void;
   onDeselectDictateBox?: () => void;
+  onAddPdfTextElement?: (el: PdfTextElement) => void;
+  onUpdatePdfTextElement?: (id: string, updated: Partial<PdfTextElement>) => void;
+  onDeletePdfTextElement?: (id: string) => void;
+  onSelectPdfTextElement?: (id: string) => void;
+  onStartEditPdfTextElement?: (id: string) => void;
+  onStopEditPdfTextElement?: () => void;
+  onDeselectPdfTextElement?: () => void;
+  onUpdatePdfImageElement?: (id: string, updated: Partial<PdfImageElement>) => void;
+  onDeletePdfImageElement?: (id: string) => void;
+  onSelectPdfImageElement?: (id: string) => void;
+  onDeselectPdfImageElement?: () => void;
   onStartEditGridDims?: (shapeId: string, field: 'cols' | 'rows') => void;
   onChangeGridDimsDraft?: (shapeId: string, field: 'cols' | 'rows', draft: string) => void;
   onStopEditGridDims?: () => void;
@@ -211,6 +245,13 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   editingDictateBoxId = null,
   isDictating = false,
   editingGridDims = null,
+  pdfEditorTool = 'select',
+  pdfDefaultTextStyle,
+  pdfTextElements = [],
+  pdfImageElements = [],
+  selectedPdfTextId = null,
+  editingPdfTextId = null,
+  selectedPdfImageId = null,
   strokes,
   shapes,
   graphs,
@@ -231,6 +272,17 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   onStopManualEditDictateBox,
   onClickOutsideDictateBox,
   onDeselectDictateBox,
+  onAddPdfTextElement,
+  onUpdatePdfTextElement,
+  onDeletePdfTextElement,
+  onSelectPdfTextElement,
+  onStartEditPdfTextElement,
+  onStopEditPdfTextElement,
+  onDeselectPdfTextElement,
+  onUpdatePdfImageElement,
+  onDeletePdfImageElement,
+  onSelectPdfImageElement,
+  onDeselectPdfImageElement,
   onStartEditGridDims,
   onChangeGridDimsDraft,
   onStopEditGridDims,
@@ -293,6 +345,20 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
         ? dictatedTextBoxes
         : dictatedTextBoxes.filter((b) => b.pageId === page.id),
     [dictatedTextBoxes, page.id]
+  );
+  const pagePdfTextElements = useMemo(
+    () =>
+      pdfTextElements.length === 0
+        ? pdfTextElements
+        : pdfTextElements.filter((t) => t.pageId === page.id),
+    [pdfTextElements, page.id]
+  );
+  const pagePdfImageElements = useMemo(
+    () =>
+      pdfImageElements.length === 0
+        ? pdfImageElements
+        : pdfImageElements.filter((img) => img.pageId === page.id),
+    [pdfImageElements, page.id]
   );
 
   const hasPageAnnotations =
@@ -615,6 +681,24 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
             onStopManualEditDictateBox={onStopManualEditDictateBox}
             onClickOutsideDictateBox={onClickOutsideDictateBox}
             onDeselectDictateBox={onDeselectDictateBox}
+            pdfEditorTool={pdfEditorTool}
+            pdfDefaultTextStyle={pdfDefaultTextStyle}
+            pdfTextElements={pagePdfTextElements}
+            pdfImageElements={pagePdfImageElements}
+            selectedPdfTextId={selectedPdfTextId}
+            editingPdfTextId={editingPdfTextId}
+            selectedPdfImageId={selectedPdfImageId}
+            onAddPdfTextElement={onAddPdfTextElement}
+            onUpdatePdfTextElement={onUpdatePdfTextElement}
+            onDeletePdfTextElement={onDeletePdfTextElement}
+            onSelectPdfTextElement={onSelectPdfTextElement}
+            onStartEditPdfTextElement={onStartEditPdfTextElement}
+            onStopEditPdfTextElement={onStopEditPdfTextElement}
+            onDeselectPdfTextElement={onDeselectPdfTextElement}
+            onUpdatePdfImageElement={onUpdatePdfImageElement}
+            onDeletePdfImageElement={onDeletePdfImageElement}
+            onSelectPdfImageElement={onSelectPdfImageElement}
+            onDeselectPdfImageElement={onDeselectPdfImageElement}
             strokes={pageStrokes}
             shapes={pageShapes}
             graphs={pageGraphs}
@@ -672,7 +756,9 @@ export const VirtualizedPageSlot = React.memo(
         prev.graphs === next.graphs &&
         prev.calculators === next.calculators &&
         prev.images === next.images &&
-        prev.dictatedTextBoxes === next.dictatedTextBoxes
+        prev.dictatedTextBoxes === next.dictatedTextBoxes &&
+        prev.pdfTextElements === next.pdfTextElements &&
+        prev.pdfImageElements === next.pdfImageElements
       );
     }
 

@@ -10,6 +10,8 @@ import {
   LiveCanvasOverlay,
   LivePresenterToolState,
   PageData,
+  PdfImageElement,
+  PdfTextElement,
   PresenterMode,
 } from '../types';
 
@@ -22,6 +24,8 @@ export interface LivestreamDocumentState {
   calculators: CalculatorBox[];
   images: CanvasImage[];
   dictatedTextBoxes?: DictatedTextBox[];
+  pdfTextElements?: PdfTextElement[];
+  pdfImageElements?: PdfImageElement[];
   presenterMode: PresenterMode;
   controlsVisibility: ControlsVisibility;
   isDarkMode: boolean;
@@ -137,7 +141,8 @@ export function saveSmallLocalStorageBackup(state: LivestreamDocumentState): voi
 
 export function computeAssetsSignature(
   pages: PageData[],
-  images: CanvasImage[]
+  images: CanvasImage[],
+  pdfImageElements: PdfImageElement[] = []
 ): string {
   const pSig = pages
     .map((p) => `${p.id}:${p.template}:${p.pdfDataUrl ? p.pdfDataUrl.length : 0}`)
@@ -145,7 +150,10 @@ export function computeAssetsSignature(
   const iSig = images
     .map((img) => `${img.id}:${img.dataUrl ? img.dataUrl.length : 0}`)
     .join('|');
-  return `${pSig}##${iSig}`;
+  const piSig = pdfImageElements
+    .map((img) => `${img.id}:${img.dataUrl ? img.dataUrl.length : 0}`)
+    .join('|');
+  return `${pSig}##${iSig}##${piSig}`;
 }
 
 /**
@@ -166,6 +174,10 @@ export function buildCompactSyncPayload(
       ...img,
       dataUrl: img.dataUrl ? '__CACHED__' : '',
     })),
+    pdfImageElements: state.pdfImageElements?.map((img) => ({
+      ...img,
+      dataUrl: img.dataUrl ? '__CACHED__' : '',
+    })),
   };
 }
 
@@ -176,15 +188,18 @@ export function buildCompactSyncPayload(
 export function mergeIncomingLivestreamState(
   incoming: LivestreamDocumentState,
   prevPages: PageData[],
-  prevImages: CanvasImage[]
+  prevImages: CanvasImage[],
+  prevPdfImages: PdfImageElement[] = []
 ): {
   mergedPages: PageData[];
   mergedImages: CanvasImage[];
+  mergedPdfImages: PdfImageElement[];
   missingAssets: boolean;
 } {
   let missingAssets = false;
   const prevPageMap = new Map(prevPages.map((p) => [p.id, p]));
   const prevImgMap = new Map(prevImages.map((img) => [img.id, img]));
+  const prevPdfImgMap = new Map(prevPdfImages.map((img) => [img.id, img]));
 
   const mergedPages = (incoming.pages || []).map((p) => {
     if (p.pdfDataUrl === '__CACHED__') {
@@ -210,5 +225,17 @@ export function mergeIncomingLivestreamState(
     return img;
   });
 
-  return { mergedPages, mergedImages, missingAssets };
+  const mergedPdfImages = (incoming.pdfImageElements || []).map((img) => {
+    if (img.dataUrl === '__CACHED__') {
+      const existing = prevPdfImgMap.get(img.id);
+      if (existing?.dataUrl && existing.dataUrl !== '__CACHED__') {
+        return { ...img, dataUrl: existing.dataUrl };
+      }
+      missingAssets = true;
+      return { ...img, dataUrl: '' };
+    }
+    return img;
+  });
+
+  return { mergedPages, mergedImages, mergedPdfImages, missingAssets };
 }

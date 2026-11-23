@@ -25,11 +25,18 @@ import {
   StylusDetectionConfig,
   LiveCanvasOverlay,
   LivePresenterToolState,
+  PdfEditorTool,
+  PdfFontFamily,
+  PdfTextAlign,
+  PdfTextElement,
+  PdfImageElement,
 } from '../types';
 import { DesmosGraphBox } from './DesmosGraphBox';
 import { ScientificCalculatorBox, CALC_BASE_WIDTH, CALC_BASE_HEIGHT } from './ScientificCalculatorBox';
 import { CanvasImageBox } from './CanvasImageBox';
 import { DictatedTextBoxItem } from './DictatedTextBoxItem';
+import { PdfTextElementItem } from './PdfTextElementItem';
+import { PdfImageElementItem } from './PdfImageElementItem';
 import { InteractiveGridBox } from './InteractiveGridBox';
 import { GhostEraserPrompt } from './GhostEraserPrompt';
 import { PresenterOverlay } from './PresenterOverlay';
@@ -154,6 +161,35 @@ interface CanvasStageProps {
   onStopManualEditDictateBox?: () => void;
   onClickOutsideDictateBox?: () => void;
   onDeselectDictateBox?: () => void;
+
+  // PDF Editor mode props
+  pdfEditorTool?: PdfEditorTool;
+  pdfDefaultTextStyle?: {
+    fontSizePt: number;
+    fontFamily: PdfFontFamily;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    color: string;
+    align: PdfTextAlign;
+    wrap: boolean;
+  };
+  pdfTextElements?: PdfTextElement[];
+  pdfImageElements?: PdfImageElement[];
+  selectedPdfTextId?: string | null;
+  editingPdfTextId?: string | null;
+  selectedPdfImageId?: string | null;
+  onAddPdfTextElement?: (el: PdfTextElement) => void;
+  onUpdatePdfTextElement?: (id: string, updated: Partial<PdfTextElement>) => void;
+  onDeletePdfTextElement?: (id: string) => void;
+  onSelectPdfTextElement?: (id: string) => void;
+  onStartEditPdfTextElement?: (id: string) => void;
+  onStopEditPdfTextElement?: () => void;
+  onDeselectPdfTextElement?: () => void;
+  onUpdatePdfImageElement?: (id: string, updated: Partial<PdfImageElement>) => void;
+  onDeletePdfImageElement?: (id: string) => void;
+  onSelectPdfImageElement?: (id: string) => void;
+  onDeselectPdfImageElement?: () => void;
 
   // Page state collections
   strokes: CanvasStroke[];
@@ -407,6 +443,33 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   onStopManualEditDictateBox,
   onClickOutsideDictateBox,
   onDeselectDictateBox,
+  pdfEditorTool = 'select',
+  pdfDefaultTextStyle = {
+    fontSizePt: 14,
+    fontFamily: 'Helvetica',
+    bold: false,
+    italic: false,
+    underline: false,
+    color: '#0F172A',
+    align: 'left',
+    wrap: true,
+  },
+  pdfTextElements = [],
+  pdfImageElements = [],
+  selectedPdfTextId = null,
+  editingPdfTextId = null,
+  selectedPdfImageId = null,
+  onAddPdfTextElement,
+  onUpdatePdfTextElement,
+  onDeletePdfTextElement,
+  onSelectPdfTextElement,
+  onStartEditPdfTextElement,
+  onStopEditPdfTextElement,
+  onDeselectPdfTextElement,
+  onUpdatePdfImageElement,
+  onDeletePdfImageElement,
+  onSelectPdfImageElement,
+  onDeselectPdfImageElement,
   strokes,
   shapes,
   graphs,
@@ -561,14 +624,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     onViewportChangeRef.current(zoomScale, panOffset);
   }, [pageId, zoomScale, panOffset, isAudienceViewer, isActivePage]);
 
+  const [stageDims, setStageDims] = useState<{ width: number; height: number }>(() => ({
+    width: 612,
+    height: aspectRatio && aspectRatio > 0 ? Math.round(612 / aspectRatio) : 792,
+  }));
+
   // Record exact logical CSS stage dimensions per page for pixel-accurate multi-page PDF/Image exports
   useEffect(() => {
-    if (isAudienceViewer) return;
     const el = containerRef.current;
     if (!el || !pageId) return;
     const record = () => {
       if (el.clientWidth > 50 && el.clientHeight > 50) {
-        recordPageStageSize(pageId, el.clientWidth, el.clientHeight);
+        const w = el.clientWidth;
+        const h = el.clientHeight;
+        setStageDims((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
+        if (!isAudienceViewer) {
+          recordPageStageSize(pageId, w, h);
+        }
       }
     };
     record();
@@ -967,6 +1039,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const [dictateDragStart, setDictateDragStart] = useState<{ x: number; y: number } | null>(null);
   const [dictateDragCurrent, setDictateDragCurrent] = useState<{ x: number; y: number } | null>(null);
 
+  // Active PDF Editor Text Box Drag
+  const [pdfTextDragStart, setPdfTextDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [pdfTextDragCurrent, setPdfTextDragCurrent] = useState<{ x: number; y: number } | null>(null);
+  const lastPdfTextTapRef = useRef<{ id: string; time: number; x: number; y: number } | null>(null);
+
   // Active Eraser Selection Box
   const [eraserSelectStart, setEraserSelectStart] = useState<{ x: number; y: number } | null>(null);
   const [eraserSelectCurrent, setEraserSelectCurrent] = useState<{ x: number; y: number } | null>(null);
@@ -1052,6 +1129,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const pageDictatedTextBoxes = useMemo(
     () => dictatedTextBoxes.filter((b) => b.pageId === pageId),
     [dictatedTextBoxes, pageId]
+  );
+  const pagePdfTextElements = useMemo(
+    () => pdfTextElements.filter((t) => t.pageId === pageId),
+    [pdfTextElements, pageId]
+  );
+  const pagePdfImageElements = useMemo(
+    () => pdfImageElements.filter((img) => img.pageId === pageId),
+    [pdfImageElements, pageId]
   );
 
   const ghostedStrokes = useMemo(
@@ -1444,8 +1529,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       mode === 'geometric' && shapeType === 'angle' && angleStep !== 'idle' && !!angleCenter;
     const hasDictatePreview =
       mode === 'dictate' && !!dictateDragStart && !!dictateDragCurrent;
+    const hasPdfTextPreview =
+      mode === 'pdf_editor' &&
+      pdfEditorTool !== 'select' &&
+      !!pdfTextDragStart &&
+      !!pdfTextDragCurrent;
 
-    if (!hasShape && !hasGraph && !hasAngle && !hasDictatePreview) {
+    if (!hasShape && !hasGraph && !hasAngle && !hasDictatePreview && !hasPdfTextPreview) {
       if (isDrawingRef.current) return;
       if (liveOverlayTimerRef.current) {
         window.clearTimeout(liveOverlayTimerRef.current);
@@ -1458,6 +1548,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
       return;
     }
+
+    const ptScalePreview =
+      (stageDims.width || 612) / (pdfWidth && pdfWidth > 0 ? pdfWidth : 612);
 
     const payload: LiveCanvasOverlay = {
       stroke: null,
@@ -1507,6 +1600,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               constantFontSize: constantDictateFontSize,
             }
           : null,
+      pdfTextPreview:
+        hasPdfTextPreview && pdfTextDragStart && pdfTextDragCurrent
+          ? {
+              pageId,
+              subMode: pdfEditorTool as 'height' | 'dimensions' | 'constant_font',
+              start: pdfTextDragStart,
+              current: pdfTextDragCurrent,
+              constantFontSizePt: Math.max(10, Math.round(pdfDefaultTextStyle.fontSizePt * ptScalePreview)),
+            }
+          : null,
     };
 
     const elapsed = Date.now() - liveOverlayThrottleRef.current;
@@ -1548,6 +1651,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     dictateDragStart,
     dictateDragCurrent,
     constantDictateFontSize,
+    pdfEditorTool,
+    pdfTextDragStart,
+    pdfTextDragCurrent,
+    pdfDefaultTextStyle.fontSizePt,
+    stageDims.width,
+    pdfWidth,
     angleStep,
     angleCenter,
     angleRadius,
@@ -1695,6 +1804,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         setGraphDragCurrent(null);
         setDictateDragStart(null);
         setDictateDragCurrent(null);
+        setPdfTextDragStart(null);
+        setPdfTextDragCurrent(null);
         setAngleStep('idle');
         setAngleCenter(null);
         setEraserSelectStart(null);
@@ -2780,14 +2891,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
     }
 
-    // Allow drawing, geometric shapes, dictate boxes, and erasers directly on top of other elements!
+    // Allow drawing, geometric shapes, dictate boxes, pdf text placement, and erasers directly on top of other elements!
     if (
       mode !== 'drawing' &&
       mode !== 'geometric' &&
       mode !== 'dictate' &&
+      !(mode === 'pdf_editor' && pdfEditorTool !== 'select') &&
       !isAnyEraseActive &&
       (e.target as HTMLElement).closest(
-        '.desmos-box, .calculator-box, .picture-box, .interactive-grid-box, .dictated-text-box'
+        '.desmos-box, .calculator-box, .picture-box, .interactive-grid-box, .dictated-text-box, .pdf-text-element, .pdf-image-element'
       )
     ) {
       return;
@@ -2806,6 +2918,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
     if (mode !== 'dictate') {
       onClickOutsideDictateBox?.();
+    }
+    if (mode === 'pdf_editor' && pdfEditorTool === 'select') {
+      onStopEditPdfTextElement?.();
+      onDeselectPdfTextElement?.();
+      onDeselectPdfImageElement?.();
     }
 
     trySetPointerCapture(e.currentTarget, e.pointerId);
@@ -2953,6 +3070,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     if (mode === 'dictate') {
       setDictateDragStart({ x, y });
       setDictateDragCurrent({ x, y });
+      return;
+    }
+
+    // PDF EDITOR MODE (Add new native PDF text box)
+    if (mode === 'pdf_editor' && pdfEditorTool !== 'select') {
+      setPdfTextDragStart({ x, y });
+      setPdfTextDragCurrent({ x, y });
       return;
     }
 
@@ -3433,6 +3557,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
+    if (mode === 'pdf_editor' && pdfTextDragStart) {
+      setPdfTextDragCurrent({ x, y });
+      return;
+    }
+
     if (mode === 'edit') {
       if (isPictureCopyActive && photoCropStart) {
         setPhotoCropCurrent({ x, y });
@@ -3744,6 +3873,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       setGraphDragCurrent(null);
       setDictateDragStart(null);
       setDictateDragCurrent(null);
+      setPdfTextDragStart(null);
+      setPdfTextDragCurrent(null);
       setAngleStep('idle');
       setAngleCenter(null);
       setEraserSelectStart(null);
@@ -4137,6 +4268,155 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       return;
     }
 
+    // PDF EDITOR: PLACE NEW TEXT BOX (OR TAP TO SELECT EXISTING PDF ELEMENT)
+    if (mode === 'pdf_editor' && pdfTextDragStart && pdfTextDragCurrent) {
+      const start = pdfTextDragStart;
+      const current = pdfTextDragCurrent;
+      setPdfTextDragStart(null);
+      setPdfTextDragCurrent(null);
+
+      const dx = current.x - start.x;
+      const dy = current.y - start.y;
+      const dist = Math.hypot(dx, dy);
+
+      const safeStageW = interactionLayerRef.current?.clientWidth || stageDims.width || 612;
+      const safeStageH = interactionLayerRef.current?.clientHeight || stageDims.height || 792;
+      const safePdfW = pdfWidth && pdfWidth > 0 ? pdfWidth : 612;
+      const pxToPt = safePdfW / safeStageW;
+
+      if (dist < 10) {
+        // Hit-test existing PDF text elements first
+        for (let i = pagePdfTextElements.length - 1; i >= 0; i--) {
+          const el = pagePdfTextElements[i];
+          if (el.status === 'deleted') continue;
+          const bx = el.nx * safeStageW;
+          const by = el.ny * safeStageH;
+          const bw = el.nw * safeStageW;
+          const bh = el.nh * safeStageH;
+          if (isPointInRotatedBox(start.x, start.y, bx, by, bw, bh, el.rotation || 0, 6)) {
+            const now = Date.now();
+            const prevTap = lastPdfTextTapRef.current;
+            if (
+              prevTap &&
+              prevTap.id === el.id &&
+              now - prevTap.time < 380 &&
+              Math.hypot(e.clientX - prevTap.x, e.clientY - prevTap.y) < 28
+            ) {
+              lastPdfTextTapRef.current = null;
+              onStartEditPdfTextElement?.(el.id);
+            } else {
+              lastPdfTextTapRef.current = { id: el.id, time: now, x: e.clientX, y: e.clientY };
+              onSelectPdfTextElement?.(el.id);
+            }
+            return;
+          }
+        }
+        // Hit-test existing PDF image elements
+        for (let i = pagePdfImageElements.length - 1; i >= 0; i--) {
+          const imgEl = pagePdfImageElements[i];
+          if (imgEl.status === 'deleted') continue;
+          const bx = imgEl.nx * safeStageW;
+          const by = imgEl.ny * safeStageH;
+          const bw = imgEl.nw * safeStageW;
+          const bh = imgEl.nh * safeStageH;
+          if (isPointInRotatedBox(start.x, start.y, bx, by, bw, bh, imgEl.rotation || 0, 6)) {
+            lastPdfTextTapRef.current = null;
+            onSelectPdfImageElement?.(imgEl.id);
+            return;
+          }
+        }
+        lastPdfTextTapRef.current = null;
+        onStopEditPdfTextElement?.();
+        onDeselectPdfTextElement?.();
+        onDeselectPdfImageElement?.();
+        return;
+      }
+
+      const id = `pdf-text-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      if (pdfEditorTool === 'height') {
+        const fontPx = Math.max(12, Math.abs(dy));
+        const fontSizePt = Math.max(8, Math.min(180, Math.round(fontPx * pxToPt * 10) / 10));
+        const boxH = Math.max(16, Math.round(fontPx * 1.15));
+        const boxW = Math.max(140, Math.round(fontPx * 3.5));
+        const topY = Math.min(start.y, current.y);
+        onAddPdfTextElement?.({
+          id,
+          pageId,
+          origin: 'added',
+          status: 'edited',
+          nx: Math.max(0, Math.min(0.95, start.x / safeStageW)),
+          ny: Math.max(0, Math.min(0.95, topY / safeStageH)),
+          nw: Math.min(0.95, boxW / safeStageW),
+          nh: Math.min(0.95, boxH / safeStageH),
+          text: '',
+          fontSizePt,
+          fontFamily: pdfDefaultTextStyle.fontFamily,
+          bold: pdfDefaultTextStyle.bold,
+          italic: pdfDefaultTextStyle.italic,
+          underline: pdfDefaultTextStyle.underline,
+          color: pdfDefaultTextStyle.color,
+          align: pdfDefaultTextStyle.align,
+          rotation: 0,
+          wrap: false,
+        });
+      } else if (pdfEditorTool === 'dimensions') {
+        const minX = Math.min(start.x, current.x);
+        const minY = Math.min(start.y, current.y);
+        const w = Math.max(80, Math.round(Math.abs(dx)));
+        const h = Math.max(16, Math.round(Math.abs(dy)));
+        const fontSizePt = Math.max(8, Math.min(180, Math.round(h * pxToPt * 10) / 10));
+        onAddPdfTextElement?.({
+          id,
+          pageId,
+          origin: 'added',
+          status: 'edited',
+          nx: Math.max(0, Math.min(0.95, minX / safeStageW)),
+          ny: Math.max(0, Math.min(0.95, minY / safeStageH)),
+          nw: Math.min(0.95, w / safeStageW),
+          nh: Math.min(0.95, Math.max(h, Math.round(h * 1.12)) / safeStageH),
+          text: '',
+          fontSizePt,
+          fontFamily: pdfDefaultTextStyle.fontFamily,
+          bold: pdfDefaultTextStyle.bold,
+          italic: pdfDefaultTextStyle.italic,
+          underline: pdfDefaultTextStyle.underline,
+          color: pdfDefaultTextStyle.color,
+          align: pdfDefaultTextStyle.align,
+          rotation: 0,
+          wrap: true,
+        });
+      } else {
+        // constant_font: horizontal drag sets wrap width using pdfDefaultTextStyle.fontSizePt
+        const fontSizePt = Math.max(6, Math.min(180, pdfDefaultTextStyle.fontSizePt));
+        const fontPx = fontSizePt / pxToPt;
+        const minX = Math.min(start.x, current.x);
+        const w = Math.max(80, Math.round(Math.abs(dx)));
+        const h = Math.max(16, Math.round(fontPx * 1.15));
+        const topY = Math.max(4, Math.round(start.y - fontPx * 0.5));
+        onAddPdfTextElement?.({
+          id,
+          pageId,
+          origin: 'added',
+          status: 'edited',
+          nx: Math.max(0, Math.min(0.95, minX / safeStageW)),
+          ny: Math.max(0, Math.min(0.95, topY / safeStageH)),
+          nw: Math.min(0.95, w / safeStageW),
+          nh: Math.min(0.95, h / safeStageH),
+          text: '',
+          fontSizePt,
+          fontFamily: pdfDefaultTextStyle.fontFamily,
+          bold: pdfDefaultTextStyle.bold,
+          italic: pdfDefaultTextStyle.italic,
+          underline: pdfDefaultTextStyle.underline,
+          color: pdfDefaultTextStyle.color,
+          align: pdfDefaultTextStyle.align,
+          rotation: 0,
+          wrap: true,
+        });
+      }
+      return;
+    }
+
     // EDIT MODE: PICTURE COPY CROP COMMIT (Real screenshot capture with html2canvas)
     if (
       mode === 'edit' &&
@@ -4294,6 +4574,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     setGraphDragCurrent(null);
     setDictateDragStart(null);
     setDictateDragCurrent(null);
+    setPdfTextDragStart(null);
+    setPdfTextDragCurrent(null);
     setEraserSelectStart(null);
     setEraserSelectCurrent(null);
     setLassoStart(null);
@@ -6096,6 +6378,72 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     </g>
                   );
                 })()}
+
+              {externalLiveOverlay.pdfTextPreview &&
+                externalLiveOverlay.pdfTextPreview.pageId === pageId && (() => {
+                  const d = externalLiveOverlay.pdfTextPreview;
+                  const dx = d.current.x - d.start.x;
+                  const dy = d.current.y - d.start.y;
+                  if (d.subMode === 'height') {
+                    const topY = Math.min(d.start.y, d.current.y);
+                    const botY = Math.max(d.start.y, d.current.y);
+                    const h = Math.max(12, Math.abs(dy));
+                    return (
+                      <g>
+                        <line
+                          x1={d.start.x}
+                          y1={topY}
+                          x2={d.start.x}
+                          y2={botY}
+                          stroke="#0D9488"
+                          strokeWidth={2.5}
+                        />
+                        <text
+                          x={d.start.x + 12}
+                          y={topY + h * 0.86}
+                          fill="rgba(13,148,136,0.45)"
+                          fontSize={h}
+                          fontFamily="sans-serif"
+                          fontWeight="500"
+                        >
+                          Aa
+                        </text>
+                      </g>
+                    );
+                  }
+                  if (d.subMode === 'dimensions') {
+                    const x = Math.min(d.start.x, d.current.x);
+                    const y = Math.min(d.start.y, d.current.y);
+                    return (
+                      <rect
+                        x={x}
+                        y={y}
+                        width={Math.abs(dx)}
+                        height={Math.abs(dy)}
+                        fill="rgba(20, 184, 166, 0.08)"
+                        stroke="#0D9488"
+                        strokeWidth={2}
+                        strokeDasharray="6 4"
+                        rx={4}
+                      />
+                    );
+                  }
+                  const minX = Math.min(d.start.x, d.current.x);
+                  const w = Math.abs(dx);
+                  return (
+                    <rect
+                      x={minX}
+                      y={d.start.y - d.constantFontSizePt * 0.5}
+                      width={w}
+                      height={d.constantFontSizePt * 1.12}
+                      fill="rgba(20, 184, 166, 0.08)"
+                      stroke="#0D9488"
+                      strokeWidth={1.5}
+                      strokeDasharray="5 4"
+                      rx={4}
+                    />
+                  );
+                })()}
             </g>
           )}
 
@@ -6442,6 +6790,68 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             );
           })()}
 
+          {/* Active PDF Editor Text Box Drag Guide Preview */}
+          {mode === 'pdf_editor' && pdfEditorTool !== 'select' && pdfTextDragStart && pdfTextDragCurrent && (() => {
+            const dx = pdfTextDragCurrent.x - pdfTextDragStart.x;
+            const dy = pdfTextDragCurrent.y - pdfTextDragStart.y;
+            const safeStageW = stageDims.width || 612;
+            const safePdfW = pdfWidth && pdfWidth > 0 ? pdfWidth : 612;
+            const fPx = Math.max(10, Math.round(pdfDefaultTextStyle.fontSizePt * (safeStageW / safePdfW)));
+
+            if (pdfEditorTool === 'height') {
+              const topY = Math.min(pdfTextDragStart.y, pdfTextDragCurrent.y);
+              const botY = Math.max(pdfTextDragStart.y, pdfTextDragCurrent.y);
+              const h = Math.max(12, Math.abs(dy));
+              const ptEst = Math.max(8, Math.round(h * (safePdfW / safeStageW)));
+              return (
+                <g>
+                  <line x1={pdfTextDragStart.x} y1={topY} x2={pdfTextDragStart.x} y2={botY} stroke="#0D9488" strokeWidth={2.5} />
+                  <line x1={pdfTextDragStart.x - 8} y1={topY} x2={pdfTextDragStart.x + 8} y2={topY} stroke="#0D9488" strokeWidth={2.5} />
+                  <line x1={pdfTextDragStart.x - 8} y1={botY} x2={pdfTextDragStart.x + 8} y2={botY} stroke="#0D9488" strokeWidth={2.5} />
+                  <text x={pdfTextDragStart.x + 14} y={topY + h * 0.86} fill="rgba(13, 148, 136, 0.35)" fontSize={h} fontFamily="sans-serif" fontWeight="600">
+                    Aa
+                  </text>
+                  <text x={pdfTextDragStart.x + 12} y={Math.max(18, topY - 8)} fill="#0D9488" fontSize={12} fontWeight="bold" fontFamily="sans-serif">
+                    PDF Text Height: {ptEst}pt (No wrap →)
+                  </text>
+                </g>
+              );
+            }
+            if (pdfEditorTool === 'dimensions') {
+              const x = Math.min(pdfTextDragStart.x, pdfTextDragCurrent.x);
+              const y = Math.min(pdfTextDragStart.y, pdfTextDragCurrent.y);
+              const w = Math.abs(dx);
+              const h = Math.max(12, Math.abs(dy));
+              const ptEst = Math.max(8, Math.round(h * (safePdfW / safeStageW)));
+              return (
+                <g>
+                  <rect x={x} y={y} width={w} height={Math.abs(dy)} fill="rgba(20, 184, 166, 0.08)" stroke="#0D9488" strokeWidth={2} strokeDasharray="6 4" rx={4} />
+                  {w > 24 && Math.abs(dy) >= 12 && (
+                    <text x={x + 6} y={y + h * 0.86} fill="rgba(13, 148, 136, 0.32)" fontSize={h} fontFamily="sans-serif" fontWeight="600">
+                      Aa
+                    </text>
+                  )}
+                  <text x={x} y={Math.max(18, y - 8)} fill="#0D9488" fontSize={12} fontWeight="bold" fontFamily="sans-serif">
+                    PDF Text Box: {Math.round(w)}px × {ptEst}pt (Wraps ↓)
+                  </text>
+                </g>
+              );
+            }
+            const minX = Math.min(pdfTextDragStart.x, pdfTextDragCurrent.x);
+            const w = Math.abs(dx);
+            return (
+              <g>
+                <rect x={minX} y={Math.max(4, pdfTextDragStart.y - fPx * 0.5)} width={w} height={fPx * 1.15} fill="rgba(20, 184, 166, 0.08)" stroke="#0D9488" strokeWidth={1.5} strokeDasharray="5 4" rx={4} />
+                <line x1={pdfTextDragStart.x} y1={pdfTextDragStart.y} x2={pdfTextDragCurrent.x} y2={pdfTextDragStart.y} stroke="#0D9488" strokeWidth={2.5} />
+                <line x1={pdfTextDragStart.x} y1={pdfTextDragStart.y - 8} x2={pdfTextDragStart.x} y2={pdfTextDragStart.y + 8} stroke="#0D9488" strokeWidth={2.5} />
+                <line x1={pdfTextDragCurrent.x} y1={pdfTextDragStart.y - 8} x2={pdfTextDragCurrent.x} y2={pdfTextDragStart.y + 8} stroke="#0D9488" strokeWidth={2.5} />
+                <text x={minX} y={Math.max(18, pdfTextDragStart.y - fPx * 0.5 - 8)} fill="#0D9488" fontSize={12} fontWeight="bold" fontFamily="sans-serif">
+                  PDF Text Width: {Math.round(w)}px · {pdfDefaultTextStyle.fontSizePt}pt
+                </text>
+              </g>
+            );
+          })()}
+
           {/* Active Eraser Select Box Area */}
           {eraserSelectStart && eraserSelectCurrent && (
             <g>
@@ -6599,13 +7009,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           <CanvasImageBox
             key={img.id}
             image={img}
-            isActive={!isAudienceViewer && selectedImageId === img.id}
+            isActive={!isAudienceViewer && mode !== 'pdf_editor' && selectedImageId === img.id}
             zoomScale={activeZoomScale * povScale}
             allowFingerControls={allowFingerElementControls}
-            isReadOnly={isAudienceViewer}
+            isReadOnly={isAudienceViewer || mode === 'pdf_editor'}
             hideChrome={isAudienceViewer && hideAudienceChrome}
             onSelect={() => {
-              if (!isAudienceViewer && selectedImageId !== img.id) {
+              if (!isAudienceViewer && mode !== 'pdf_editor' && selectedImageId !== img.id) {
                 setSelectedImageId(img.id);
                 setSelectedGraphId(null);
                 setSelectedCalcId(null);
@@ -6622,15 +7032,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           .filter((sh) => sh.type === 'grid')
           .map((gridShape) => {
             const isEditingThisGrid =
-              !isAudienceViewer && editingGridDims?.shapeId === gridShape.id;
+              !isAudienceViewer && mode !== 'pdf_editor' && editingGridDims?.shapeId === gridShape.id;
             return (
               <InteractiveGridBox
                 key={gridShape.id}
                 shape={gridShape}
-                isActive={!isAudienceViewer && selectedGridShapeId === gridShape.id}
+                isActive={!isAudienceViewer && mode !== 'pdf_editor' && selectedGridShapeId === gridShape.id}
                 zoomScale={activeZoomScale * povScale}
                 allowFingerControls={allowFingerElementControls}
-                isReadOnly={isAudienceViewer}
+                isReadOnly={isAudienceViewer || mode === 'pdf_editor'}
                 hideChrome={isAudienceViewer && hideAudienceChrome}
                 editingDimsField={isEditingThisGrid ? editingGridDims.field : null}
                 editingDimsDraft={isEditingThisGrid ? editingGridDims.draft : ''}
@@ -6640,7 +7050,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 }
                 onStopEditDims={() => onStopEditGridDims?.()}
                 onSelect={() => {
-                  if (!isAudienceViewer && selectedGridShapeId !== gridShape.id) {
+                  if (!isAudienceViewer && mode !== 'pdf_editor' && selectedGridShapeId !== gridShape.id) {
                     setSelectedGridShapeId(gridShape.id);
                     onStopEditGridDims?.();
                     setSelectedGraphId(null);
@@ -6664,14 +7074,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           <DesmosGraphBox
             key={g.id}
             box={g}
-            isActive={!isAudienceViewer && selectedGraphId === g.id}
+            isActive={!isAudienceViewer && mode !== 'pdf_editor' && selectedGraphId === g.id}
             isMagicGrabActive={!isAudienceViewer && mode === 'edit' && isMagicGrabActive}
             zoomScale={activeZoomScale * povScale}
             allowFingerControls={allowFingerElementControls}
-            isReadOnly={isAudienceViewer}
+            isReadOnly={isAudienceViewer || mode === 'pdf_editor'}
             hideChrome={isAudienceViewer && hideAudienceChrome}
             onSelect={() => {
-              if (!isAudienceViewer && selectedGraphId !== g.id) {
+              if (!isAudienceViewer && mode !== 'pdf_editor' && selectedGraphId !== g.id) {
                 setSelectedGraphId(g.id);
                 setSelectedCalcId(null);
                 setSelectedImageId(null);
@@ -6688,16 +7098,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           <ScientificCalculatorBox
             key={c.id}
             box={c}
-            isActive={!isAudienceViewer && selectedCalcId === c.id}
+            isActive={!isAudienceViewer && mode !== 'pdf_editor' && selectedCalcId === c.id}
             zoomScale={activeZoomScale * povScale}
             allowFingerControls={allowFingerElementControls}
-            isReadOnly={isAudienceViewer}
+            isReadOnly={isAudienceViewer || mode === 'pdf_editor'}
             hideChrome={isAudienceViewer && hideAudienceChrome}
             disableTwoFingerPinch={
               touchInputMode === 'stylus_only' || touchInputMode === 'stylus_and_hand'
             }
             onSelect={() => {
-              if (!isAudienceViewer && selectedCalcId !== c.id) {
+              if (!isAudienceViewer && mode !== 'pdf_editor' && selectedCalcId !== c.id) {
                 setSelectedCalcId(c.id);
                 setSelectedGraphId(null);
                 setSelectedImageId(null);
@@ -6713,21 +7123,26 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         {pageDictatedTextBoxes.map((box) => {
           const isThisDictating = activeDictateBoxId === box.id;
           const isThisTransform = selectedDictateBoxId === box.id;
-          const isThisEditing = !isAudienceViewer && editingDictateBoxId === box.id;
+          const isThisEditing = !isAudienceViewer && mode !== 'pdf_editor' && editingDictateBoxId === box.id;
           return (
             <DictatedTextBoxItem
               key={box.id}
               box={box}
               isDictatingActive={isThisDictating}
               isListening={isThisDictating && isDictating}
-              showTransformBox={isThisTransform}
+              showTransformBox={isThisTransform && mode !== 'pdf_editor'}
               isEditing={isThisEditing}
               isEraserActive={isAnyEraseActive}
               zoomScale={activeZoomScale * povScale}
               allowFingerControls={allowFingerElementControls}
-              isReadOnly={isAudienceViewer}
+              isReadOnly={isAudienceViewer || mode === 'pdf_editor'}
               hideChrome={isAudienceViewer && hideAudienceChrome}
-              passThroughBody={mode === 'drawing' || mode === 'geometric' || isAnyEraseActive}
+              passThroughBody={
+                mode === 'drawing' ||
+                mode === 'geometric' ||
+                mode === 'pdf_editor' ||
+                isAnyEraseActive
+              }
               onSelectForTransform={() => onSelectDictateBoxForTransform?.(box.id)}
               onResumeDictation={
                 onResumeDictateBox ? () => onResumeDictateBox(box.id) : undefined
@@ -6745,6 +7160,51 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             />
           );
         })}
+
+        {/* 5.6 NATIVE PDF EDITOR LAYERS (Images + Native/Added Text Elements, strictly isolated from NoteTeacher items) */}
+        {pagePdfImageElements.map((imgEl) => (
+          <PdfImageElementItem
+            key={imgEl.id}
+            element={imgEl}
+            stageWidth={stageDims.width}
+            stageHeight={stageDims.height}
+            isPdfEditorActive={!isAudienceViewer && mode === 'pdf_editor'}
+            isSelected={!isAudienceViewer && mode === 'pdf_editor' && selectedPdfImageId === imgEl.id}
+            zoomScale={activeZoomScale * povScale}
+            allowFingerControls={allowFingerElementControls}
+            isReadOnly={isAudienceViewer || mode !== 'pdf_editor'}
+            hideChrome={isAudienceViewer && hideAudienceChrome}
+            onSelect={() => onSelectPdfImageElement?.(imgEl.id)}
+            onDeselect={() => onDeselectPdfImageElement?.()}
+            onUpdate={(updated) => onUpdatePdfImageElement?.(imgEl.id, updated)}
+            onCommitHistory={onTransformEnd}
+            onDelete={() => onDeletePdfImageElement?.(imgEl.id)}
+          />
+        ))}
+
+        {pagePdfTextElements.map((txtEl) => (
+          <PdfTextElementItem
+            key={txtEl.id}
+            element={txtEl}
+            stageWidth={stageDims.width}
+            stageHeight={stageDims.height}
+            pagePdfWidth={pdfWidth || 612}
+            isPdfEditorActive={!isAudienceViewer && mode === 'pdf_editor'}
+            isSelected={!isAudienceViewer && mode === 'pdf_editor' && selectedPdfTextId === txtEl.id}
+            isEditing={!isAudienceViewer && mode === 'pdf_editor' && editingPdfTextId === txtEl.id}
+            zoomScale={activeZoomScale * povScale}
+            allowFingerControls={allowFingerElementControls}
+            isReadOnly={isAudienceViewer || mode !== 'pdf_editor'}
+            hideChrome={isAudienceViewer && hideAudienceChrome}
+            onSelect={() => onSelectPdfTextElement?.(txtEl.id)}
+            onStartEdit={() => onStartEditPdfTextElement?.(txtEl.id)}
+            onStopEdit={() => onStopEditPdfTextElement?.()}
+            onDeselect={() => onDeselectPdfTextElement?.()}
+            onUpdate={(updated) => onUpdatePdfTextElement?.(txtEl.id, updated)}
+            onCommitHistory={onTransformEnd}
+            onDelete={() => onDeletePdfTextElement?.(txtEl.id)}
+          />
+        ))}
 
         {/* 6. INTERACTION LAYER */}
         {!isAudienceViewer && (
@@ -6764,6 +7224,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             className={`drawing-layer absolute inset-0 touch-none ${
               mode === 'drawing' ||
               isAnyEraseActive ||
+              (mode === 'pdf_editor' && pdfEditorTool !== 'select') ||
               ((touchInputMode === 'stylus_and_hand' || touchInputMode === 'stylus_only') &&
                 leftToolbarTool !== 'pointer')
                 ? 'z-[45]'
@@ -6783,6 +7244,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 ? 'cursor-none'
                 : mode === 'calculator'
                 ? 'cursor-pointer'
+                : mode === 'pdf_editor'
+                ? pdfEditorTool === 'select'
+                  ? 'cursor-default'
+                  : 'cursor-crosshair'
                 : mode === 'edit'
                 ? isPictureCopyActive
                   ? 'cursor-crosshair'

@@ -4,11 +4,15 @@ export type AppMode =
   | 'graphing'
   | 'geometric'
   | 'dictate'
+  | 'pdf_editor'
   | 'edit'
   | 'presenter'
   | 'touch_controls';
 
 export type DictateSubMode = 'height' | 'dimensions' | 'constant_font';
+export type PdfEditorTool = 'select' | 'height' | 'dimensions' | 'constant_font';
+export type PdfFontFamily = 'Helvetica' | 'TimesRoman' | 'Courier';
+export type PdfTextAlign = 'left' | 'center' | 'right' | 'justify';
 
 export type TouchInputMode =
   | 'two_finger'
@@ -156,12 +160,21 @@ export interface LiveDictatePreview {
   constantFontSize: number;
 }
 
+export interface LivePdfTextPreview {
+  pageId: string;
+  subMode: DictateSubMode;
+  start: { x: number; y: number };
+  current: { x: number; y: number };
+  constantFontSizePt: number;
+}
+
 export interface LiveCanvasOverlay {
   stroke?: LiveStrokePreview | null;
   shape?: LiveShapePreview | null;
   graphMarquee?: LiveGraphMarqueePreview | null;
   angle?: LiveAnglePreview | null;
   dictatePreview?: LiveDictatePreview | null;
+  pdfTextPreview?: LivePdfTextPreview | null;
 }
 
 export interface LivePresenterToolState {
@@ -267,6 +280,71 @@ export interface DictatedTextBox {
   wrap: boolean;
   boxMode: DictateSubMode;
   isGhosted?: boolean;
+}
+
+export interface PdfNativeBounds {
+  nx: number;
+  ny: number;
+  nw: number;
+  nh: number;
+}
+
+export interface PdfNativeTextSpan {
+  str: string;
+  nx: number;
+  ny: number;
+  nw: number;
+  nh: number;
+}
+
+export interface PdfTextElement {
+  id: string;
+  pageId: string;
+  origin: 'native' | 'added';
+  nx: number;
+  ny: number;
+  nw: number;
+  nh: number;
+  originalBounds?: PdfNativeBounds;
+  originalText?: string;
+  sourceSpans?: PdfNativeTextSpan[];
+  text: string;
+  fontSizePt: number;
+  fontFamily: PdfFontFamily;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  color: string;
+  align: PdfTextAlign;
+  rotation: number;
+  wrap: boolean;
+  boxMode?: DictateSubMode;
+  status: 'unmodified' | 'edited' | 'deleted';
+}
+
+export interface PdfImageCrop {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+export interface PdfImageElement {
+  id: string;
+  pageId: string;
+  origin: 'native' | 'added';
+  nx: number;
+  ny: number;
+  nw: number;
+  nh: number;
+  originalBounds?: PdfNativeBounds;
+  nativeObjId?: string;
+  dataUrl: string;
+  naturalWidth: number;
+  naturalHeight: number;
+  crop: PdfImageCrop;
+  rotation: number;
+  status: 'unmodified' | 'edited' | 'deleted';
 }
 
 export interface GrabbedSelection {

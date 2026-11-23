@@ -56,6 +56,7 @@ interface AnchoredScreenPopupProps {
   respectHeader?: boolean;
   freezePosition?: boolean;
   className?: string;
+  onClose?: () => void;
   children: React.ReactNode;
 }
 
@@ -73,6 +74,7 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
   respectHeader = true,
   freezePosition = false,
   className = '',
+  onClose,
   children,
 }) => {
   const popupRef = useRef<HTMLDivElement>(null);
@@ -223,6 +225,19 @@ export const AnchoredScreenPopup: React.FC<AnchoredScreenPopupProps> = ({
       window.removeEventListener('resize', scheduleSync);
     };
   }, [anchorRef, recomputePosition]);
+
+  useEffect(() => {
+    if (!onClose) return;
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (popupRef.current?.contains(target)) return;
+      if (anchorRef.current?.contains(target)) return;
+      onClose();
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, [onClose, anchorRef]);
 
   if (typeof document === 'undefined') return null;
 

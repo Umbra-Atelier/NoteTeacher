@@ -46,7 +46,13 @@ import {
   ExplorerFileItem,
   ExplorerFolderTab,
   ActiveFileContext,
+  PdfEditorTool,
+  PdfFontFamily,
+  PdfTextAlign,
+  PdfTextElement,
+  PdfImageElement,
 } from './types';
+import { extractNativePdfPageElements } from './utils/pdfNativeExtractor';
 import { useSpeechDictation } from './utils/speechDictation';
 import { TopBarRibbon } from './components/TopBarRibbon';
 import { CanvasStage } from './components/CanvasStage';
@@ -116,6 +122,7 @@ import {
 } from './utils/livestreamSync';
 import {
   captureAllMountedWidgets,
+  getRecordedPageStageSize,
   invalidateAllWidgetSnapshots,
   syncLiveDesmosBoxes,
 } from './utils/widgetSnapshotCache';
@@ -135,6 +142,8 @@ const EMPTY_GRAPHS: DesmosBox[] = [];
 const EMPTY_CALCULATORS: CalculatorBox[] = [];
 const EMPTY_IMAGES: CanvasImage[] = [];
 const EMPTY_DICTATED: DictatedTextBox[] = [];
+const EMPTY_PDF_TEXTS: PdfTextElement[] = [];
+const EMPTY_PDF_IMAGES: PdfImageElement[] = [];
 
 function clampMinPenPressure(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
@@ -448,6 +457,48 @@ export default function App() {
   const [isDictateEraserActive, setIsDictateEraserActive] = useState<boolean>(false);
   const [isClearModalOpen, setIsClearModalOpen] = useState(false);
 
+  // PDF Editor Mode state (edits native PDF layers / adds PDF-native text & images cleanly beneath NoteTeacher overlays)
+  const [pdfTextElements, setPdfTextElements] = useState<PdfTextElement[]>([]);
+  const [pdfImageElements, setPdfImageElements] = useState<PdfImageElement[]>([]);
+  const [pdfEditorTool, setPdfEditorTool] = useState<PdfEditorTool>('select');
+  const [pdfDefaultTextStyle, setPdfDefaultTextStyle] = useState<{
+    fontSizePt: number;
+    fontFamily: PdfFontFamily;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    color: string;
+    align: PdfTextAlign;
+    wrap: boolean;
+  }>({
+    fontSizePt: 14,
+    fontFamily: 'Helvetica',
+    bold: false,
+    italic: false,
+    underline: false,
+    color: '#000000',
+    align: 'left',
+    wrap: true,
+  });
+  const [selectedPdfTextId, setSelectedPdfTextId] = useState<string | null>(null);
+  const [editingPdfTextId, setEditingPdfTextId] = useState<string | null>(null);
+  const [selectedPdfImageId, setSelectedPdfImageId] = useState<string | null>(null);
+  const [isExtractingPdfLayers, setIsExtractingPdfLayers] = useState<boolean>(false);
+
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const pdfTextElementsRef = useRef(pdfTextElements);
+  pdfTextElementsRef.current = pdfTextElements;
+  const pdfImageElementsRef = useRef(pdfImageElements);
+  pdfImageElementsRef.current = pdfImageElements;
+  const selectedPdfTextIdRef = useRef(selectedPdfTextId);
+  selectedPdfTextIdRef.current = selectedPdfTextId;
+  const editingPdfTextIdRef = useRef(editingPdfTextId);
+  editingPdfTextIdRef.current = editingPdfTextId;
+  const selectedPdfImageIdRef = useRef(selectedPdfImageId);
+  selectedPdfImageIdRef.current = selectedPdfImageId;
+  const extractedPdfPageIdsRef = useRef<Set<string>>(new Set());
+
   const dictatedTextBoxesRef = useRef(dictatedTextBoxes);
   dictatedTextBoxesRef.current = dictatedTextBoxes;
   const activeDictateBoxIdRef = useRef(activeDictateBoxId);
@@ -486,6 +537,11 @@ export default function App() {
     (nextMode: AppMode) => {
       setEditingDictateBoxId(null);
       setEditingGridDims(null);
+      if (nextMode !== 'pdf_editor') {
+        setSelectedPdfTextId(null);
+        setEditingPdfTextId(null);
+        setSelectedPdfImageId(null);
+      }
       if (nextMode !== 'dictate' && activeDictateBoxIdRef.current) {
         stopDictation();
         const curId = activeDictateBoxIdRef.current;
@@ -610,6 +666,13 @@ export default function App() {
     }
 
     setScrollPageNumber((prev) => (prev === bestIdx + 1 ? prev : bestIdx + 1));
+    if (!manualScrollLockRef.current) {
+      const targetPage = allPages[bestIdx];
+      if (targetPage && currentPageIdRef.current !== targetPage.id) {
+        currentPageIdRef.current = targetPage.id;
+        setCurrentPageId(targetPage.id);
+      }
+    }
   }, []);
 
   const updateScrollPageIndicator = useCallback(() => {
@@ -685,6 +748,8 @@ export default function App() {
     calculators: CalculatorBox[];
     images: CanvasImage[];
     dictatedTextBoxes?: DictatedTextBox[];
+    pdfTextElements?: PdfTextElement[];
+    pdfImageElements?: PdfImageElement[];
   }
   const [historyStack, setHistoryStack] = useState<HistoryState[]>([]);
   const [redoStack, setRedoStack] = useState<HistoryState[]>([]);
@@ -993,6 +1058,9 @@ export default function App() {
     shapes: GeometricShape[];
   } | null>(null);
 
+  const pdfImagesRef = useRef(pdfImageElements);
+  pdfImagesRef.current = pdfImageElements;
+
   const latestSyncStateRef = useRef<{
     pages: PageData[];
     currentPageId: string;
@@ -1002,6 +1070,8 @@ export default function App() {
     calculators: CalculatorBox[];
     images: CanvasImage[];
     dictatedTextBoxes: DictatedTextBox[];
+    pdfTextElements: PdfTextElement[];
+    pdfImageElements: PdfImageElement[];
     presenterMode: PresenterMode;
     controlsVisibility: ControlsVisibility;
     isDarkMode: boolean;
@@ -1015,6 +1085,8 @@ export default function App() {
     calculators,
     images,
     dictatedTextBoxes,
+    pdfTextElements,
+    pdfImageElements,
     presenterMode,
     controlsVisibility: presenterSettings.controlsVisibility,
     isDarkMode,
@@ -1029,6 +1101,8 @@ export default function App() {
     calculators,
     images,
     dictatedTextBoxes,
+    pdfTextElements,
+    pdfImageElements,
     presenterMode,
     controlsVisibility: presenterSettings.controlsVisibility,
     isDarkMode,
@@ -1337,13 +1411,16 @@ export default function App() {
       let retryTimer2: number | null = null;
 
       const applyIncomingState = (p: LivestreamDocumentState) => {
-        const { mergedPages, mergedImages, missingAssets } = mergeIncomingLivestreamState(
-          p,
-          pagesRef.current,
-          imagesRef.current
-        );
+        const { mergedPages, mergedImages, mergedPdfImages, missingAssets } =
+          mergeIncomingLivestreamState(
+            p,
+            pagesRef.current,
+            imagesRef.current,
+            pdfImagesRef.current
+          );
         pagesRef.current = mergedPages;
         imagesRef.current = mergedImages;
+        pdfImagesRef.current = mergedPdfImages;
         setPages(mergedPages);
         if (p.currentPageId) setCurrentPageId(p.currentPageId);
         if (p.strokes) setStrokes(p.strokes);
@@ -1351,6 +1428,8 @@ export default function App() {
         if (p.graphs) setGraphs(p.graphs);
         if (p.calculators) setCalculators(p.calculators);
         if (p.dictatedTextBoxes) setDictatedTextBoxes(p.dictatedTextBoxes);
+        if (p.pdfTextElements) setPdfTextElements(p.pdfTextElements);
+        if (p.pdfImageElements) setPdfImageElements(mergedPdfImages);
         setImages(mergedImages);
         if (p.presenterMode !== undefined) {
           setPresenterMode(
@@ -1445,7 +1524,11 @@ export default function App() {
                 graphs: syncLiveDesmosBoxes(latest.graphs),
                 updatedAt: Date.now(),
               };
-              lastBroadcastAssetsSigRef.current = computeAssetsSignature(nextPages, latest.images);
+              lastBroadcastAssetsSigRef.current = computeAssetsSignature(
+                nextPages,
+                latest.images,
+                latest.pdfImageElements
+              );
               postSyncMessageSafe(channel, { type: 'sync_state', payload: hydratedSnap });
               void saveLivestreamSnapshotToDb(hydratedSnap);
             });
@@ -1516,6 +1599,8 @@ export default function App() {
       calculators,
       images,
       dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements,
       presenterMode,
       controlsVisibility: presenterSettings.controlsVisibility,
       isDarkMode,
@@ -1523,7 +1608,7 @@ export default function App() {
       updatedAt: Date.now(),
     };
 
-    const assetsSig = computeAssetsSignature(hydratedPages, images);
+    const assetsSig = computeAssetsSignature(hydratedPages, images, pdfImageElements);
     const assetsChanged = assetsSig !== lastBroadcastAssetsSigRef.current;
 
     if (assetsChanged) {
@@ -1599,7 +1684,7 @@ export default function App() {
           const nextPages = cur.pages.map((p) =>
             p.id === activePage.id ? { ...p, pdfDataUrl: resolvedUrl } : p
           );
-          const nextSig = computeAssetsSignature(nextPages, cur.images);
+          const nextSig = computeAssetsSignature(nextPages, cur.images, cur.pdfImageElements);
           if (nextSig === lastBroadcastAssetsSigRef.current) return;
           lastBroadcastAssetsSigRef.current = nextSig;
 
@@ -1631,6 +1716,8 @@ export default function App() {
     calculators,
     images,
     dictatedTextBoxes,
+    pdfTextElements,
+    pdfImageElements,
     presenterMode,
     presenterSettings.controlsVisibility,
     isDarkMode,
@@ -1691,7 +1778,11 @@ export default function App() {
           graphs: syncLiveDesmosBoxes(latest.graphs),
           updatedAt: Date.now(),
         };
-        lastBroadcastAssetsSigRef.current = computeAssetsSignature(nextPages, latest.images);
+        lastBroadcastAssetsSigRef.current = computeAssetsSignature(
+          nextPages,
+          latest.images,
+          latest.pdfImageElements
+        );
         void saveLivestreamSnapshotToDb(snap);
         postSyncMessageSafe(syncChannelRef.current, { type: 'sync_state', payload: snap });
       });
@@ -1709,10 +1800,12 @@ export default function App() {
         calculators: [...calculators],
         images: [...images],
         dictatedTextBoxes: [...dictatedTextBoxes],
+        pdfTextElements: [...pdfTextElements],
+        pdfImageElements: [...pdfImageElements],
       },
     ]);
     setRedoStack([]);
-  }, [strokes, shapes, graphs, calculators, images, dictatedTextBoxes]);
+  }, [strokes, shapes, graphs, calculators, images, dictatedTextBoxes, pdfTextElements, pdfImageElements]);
 
   // Undo / Redo
   const handleUndo = useCallback(() => {
@@ -1728,6 +1821,8 @@ export default function App() {
         calculators: [...calculators],
         images: [...images],
         dictatedTextBoxes: [...dictatedTextBoxes],
+        pdfTextElements: [...pdfTextElements],
+        pdfImageElements: [...pdfImageElements],
       },
     ]);
     setStrokes(previous.strokes);
@@ -1736,9 +1831,15 @@ export default function App() {
     setCalculators(previous.calculators);
     setImages(previous.images || []);
     setDictatedTextBoxes(previous.dictatedTextBoxes || []);
+    if (previous.pdfTextElements !== undefined) {
+      setPdfTextElements(previous.pdfTextElements);
+    }
+    if (previous.pdfImageElements !== undefined) {
+      setPdfImageElements(previous.pdfImageElements);
+    }
     setHistoryStack((prev) => prev.slice(0, -1));
     invalidateAllWidgetSnapshots();
-  }, [historyStack, strokes, shapes, graphs, calculators, images, dictatedTextBoxes]);
+  }, [historyStack, strokes, shapes, graphs, calculators, images, dictatedTextBoxes, pdfTextElements, pdfImageElements]);
 
   const handleRedo = useCallback(() => {
     preEraseBackupRef.current = null;
@@ -1753,6 +1854,8 @@ export default function App() {
         calculators: [...calculators],
         images: [...images],
         dictatedTextBoxes: [...dictatedTextBoxes],
+        pdfTextElements: [...pdfTextElements],
+        pdfImageElements: [...pdfImageElements],
       },
     ]);
     setStrokes(next.strokes);
@@ -1761,9 +1864,15 @@ export default function App() {
     setCalculators(next.calculators);
     setImages(next.images || []);
     setDictatedTextBoxes(next.dictatedTextBoxes || []);
+    if (next.pdfTextElements !== undefined) {
+      setPdfTextElements(next.pdfTextElements);
+    }
+    if (next.pdfImageElements !== undefined) {
+      setPdfImageElements(next.pdfImageElements);
+    }
     setRedoStack((prev) => prev.slice(0, -1));
     invalidateAllWidgetSnapshots();
-  }, [redoStack, strokes, shapes, graphs, calculators, images, dictatedTextBoxes]);
+  }, [redoStack, strokes, shapes, graphs, calculators, images, dictatedTextBoxes, pdfTextElements, pdfImageElements]);
 
   // =========================================================================
   // EDIT MODE CLIPBOARD & DELETE HANDLERS (Cut, Copy, Paste, Delete)
@@ -2070,6 +2179,18 @@ export default function App() {
           handlePaste();
         }
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (modeRef.current === 'pdf_editor') {
+          if (selectedPdfTextIdRef.current) {
+            e.preventDefault();
+            handleDeletePdfTextElement(selectedPdfTextIdRef.current);
+            return;
+          }
+          if (selectedPdfImageIdRef.current) {
+            e.preventDefault();
+            handleDeletePdfImageElement(selectedPdfImageIdRef.current);
+            return;
+          }
+        }
         if (hasSelection) {
           e.preventDefault();
           handleDeleteSelected();
@@ -2104,6 +2225,10 @@ export default function App() {
             reader.onload = (loadEvent) => {
               const dataUrl = loadEvent.target?.result as string;
               if (dataUrl) {
+                if (modeRef.current === 'pdf_editor') {
+                  insertPdfImageDataUrl(dataUrl);
+                  return;
+                }
                 const img = new Image();
                 img.onload = () => {
                   const maxW = 420;
@@ -2605,6 +2730,9 @@ export default function App() {
     const remainingPages = pages.filter((p) => p.id !== deletedId);
     setPages(remainingPages);
     handleClearCurrentPageElements();
+    setPdfTextElements((prev) => prev.filter((t) => t.pageId !== deletedId));
+    setPdfImageElements((prev) => prev.filter((im) => im.pageId !== deletedId));
+    extractedPdfPageIdsRef.current.delete(deletedId);
     releasePagePdfResources(deletedId);
     clearCachedPagePreview(deletedId);
     setCurrentPageId(remainingPages[0].id);
@@ -3064,6 +3192,69 @@ export default function App() {
         return;
       }
 
+      const pdfTextId = editingPdfTextIdRef.current;
+      if (pdfTextId) {
+        const target = pdfTextElementsRef.current.find((t) => t.id === pdfTextId);
+        if (!target) return;
+
+        const ta = document.querySelector<HTMLTextAreaElement>(
+          `textarea[data-pdf-text-editor="${pdfTextId}"]`
+        );
+        const curText = target.text || '';
+        const selStart =
+          ta && typeof ta.selectionStart === 'number' ? ta.selectionStart : curText.length;
+        const selEnd = ta && typeof ta.selectionEnd === 'number' ? ta.selectionEnd : curText.length;
+
+        let nextText = curText;
+        let nextCaret = selStart;
+
+        if (action.type === 'char') {
+          nextText = curText.slice(0, selStart) + action.value + curText.slice(selEnd);
+          nextCaret = selStart + action.value.length;
+        } else if (action.type === 'space') {
+          nextText = curText.slice(0, selStart) + ' ' + curText.slice(selEnd);
+          nextCaret = selStart + 1;
+        } else if (action.type === 'enter') {
+          nextText = curText.slice(0, selStart) + '\n' + curText.slice(selEnd);
+          nextCaret = selStart + 1;
+        } else if (action.type === 'backspace') {
+          if (selEnd > selStart) {
+            nextText = curText.slice(0, selStart) + curText.slice(selEnd);
+            nextCaret = selStart;
+          } else if (selStart > 0) {
+            nextText = curText.slice(0, selStart - 1) + curText.slice(selStart);
+            nextCaret = selStart - 1;
+          }
+        } else if (action.type === 'move_cursor') {
+          const clamped = Math.max(0, Math.min(curText.length, selStart + action.delta));
+          requestAnimationFrame(() => {
+            const el = document.querySelector<HTMLTextAreaElement>(
+              `textarea[data-pdf-text-editor="${pdfTextId}"]`
+            );
+            if (el) {
+              el.focus();
+              el.setSelectionRange(clamped, clamped);
+            }
+          });
+          return;
+        }
+
+        setPdfTextElements((prev) =>
+          prev.map((t) => (t.id === pdfTextId ? { ...t, text: nextText, status: 'edited' } : t))
+        );
+
+        requestAnimationFrame(() => {
+          const el = document.querySelector<HTMLTextAreaElement>(
+            `textarea[data-pdf-text-editor="${pdfTextId}"]`
+          );
+          if (el) {
+            el.focus();
+            el.setSelectionRange(nextCaret, nextCaret);
+          }
+        });
+        return;
+      }
+
       const boxId = editingDictateBoxIdRef.current;
       if (!boxId) return;
       const target = dictatedTextBoxesRef.current.find((b) => b.id === boxId);
@@ -3127,6 +3318,332 @@ export default function App() {
     },
     [applyGridDimDraft, handleStartEditGridDims, handleStopEditGridDims, syncBaseTextIfIdle]
   );
+
+  // =========================================================================
+  // PDF EDITOR NATIVE LAYER EXTRACTION & ELEMENT HANDLERS
+  // =========================================================================
+  useEffect(() => {
+    if (isViewerTab || mode !== 'pdf_editor') return;
+    const activePage = pages.find((p) => p.id === currentPageId);
+    if (!activePage || activePage.template !== 'pdf') return;
+    if (extractedPdfPageIdsRef.current.has(activePage.id)) return;
+
+    const alreadyHasNative =
+      pdfTextElementsRef.current.some((t) => t.pageId === activePage.id && t.origin === 'native') ||
+      pdfImageElementsRef.current.some((im) => im.pageId === activePage.id && im.origin === 'native');
+    if (alreadyHasNative) {
+      extractedPdfPageIdsRef.current.add(activePage.id);
+      return;
+    }
+
+    extractedPdfPageIdsRef.current.add(activePage.id);
+    let cancelled = false;
+    setIsExtractingPdfLayers(true);
+
+    void extractNativePdfPageElements(activePage)
+      .then(({ texts, images }) => {
+        if (cancelled) return;
+        if (texts.length > 0) {
+          setPdfTextElements((prev) => {
+            const existingIds = new Set(prev.map((item) => item.id));
+            const uniqueNew = texts.filter((item) => !existingIds.has(item.id));
+            return uniqueNew.length > 0 ? [...prev, ...uniqueNew] : prev;
+          });
+        }
+        if (images.length > 0) {
+          setPdfImageElements((prev) => {
+            const existingIds = new Set(prev.map((item) => item.id));
+            const uniqueNew = images.filter((item) => !existingIds.has(item.id));
+            return uniqueNew.length > 0 ? [...prev, ...uniqueNew] : prev;
+          });
+        }
+      })
+      .catch((err) => {
+        console.warn('Native PDF extraction failed:', err);
+        extractedPdfPageIdsRef.current.delete(activePage.id);
+      })
+      .finally(() => {
+        if (!cancelled) setIsExtractingPdfLayers(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isViewerTab, mode, currentPageId, pages]);
+
+  const handleRescanPdfLayers = useCallback(async () => {
+    const activePage = pagesRef.current.find((p) => p.id === currentPageIdRef.current);
+    if (!activePage || activePage.template !== 'pdf') return;
+    setIsExtractingPdfLayers(true);
+    try {
+      const { texts, images } = await extractNativePdfPageElements(activePage);
+      setPdfTextElements((prev) => {
+        const preserved = prev.filter(
+          (t) => !(t.pageId === activePage.id && t.origin === 'native' && t.status === 'unmodified')
+        );
+        const modifiedNativeIds = new Set(
+          preserved.filter((t) => t.pageId === activePage.id).map((t) => t.id)
+        );
+        const added = texts.filter((t) => !modifiedNativeIds.has(t.id));
+        return [...preserved, ...added];
+      });
+      setPdfImageElements((prev) => {
+        const preserved = prev.filter(
+          (im) => !(im.pageId === activePage.id && im.origin === 'native' && im.status === 'unmodified')
+        );
+        const modifiedNativeIds = new Set(
+          preserved.filter((im) => im.pageId === activePage.id).map((im) => im.id)
+        );
+        const added = images.filter((im) => !modifiedNativeIds.has(im.id));
+        return [...preserved, ...added];
+      });
+      extractedPdfPageIdsRef.current.add(activePage.id);
+      setAppStatusNotice({
+        kind: 'success',
+        message: `Scanned ${texts.length} PDF text blocks & ${images.length} PDF images.`,
+      });
+    } catch {
+      setAppStatusNotice({
+        kind: 'error',
+        message: 'Could not scan native PDF layers on this page.',
+      });
+    } finally {
+      setIsExtractingPdfLayers(false);
+    }
+  }, []);
+
+  const handleAddPdfTextElement = useCallback(
+    (el: PdfTextElement) => {
+      saveSnapshot();
+      setPdfTextElements((prev) => [...prev, el]);
+      setSelectedPdfTextId(el.id);
+      setEditingPdfTextId(el.id);
+      setSelectedPdfImageId(null);
+    },
+    [saveSnapshot]
+  );
+
+  const handleUpdatePdfTextElement = useCallback((id: string, updated: Partial<PdfTextElement>) => {
+    setPdfTextElements((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, ...updated } : item))
+    );
+  }, []);
+
+  const handleDeletePdfTextElement = useCallback(
+    (id: string) => {
+      saveSnapshot();
+      setPdfTextElements((prev) =>
+        prev.flatMap((item) => {
+          if (item.id !== id) return [item];
+          if (item.origin === 'native') {
+            return [{ ...item, status: 'deleted' as const }];
+          }
+          return [];
+        })
+      );
+      if (selectedPdfTextIdRef.current === id) setSelectedPdfTextId(null);
+      if (editingPdfTextIdRef.current === id) setEditingPdfTextId(null);
+    },
+    [saveSnapshot]
+  );
+
+  const handleSelectPdfTextElement = useCallback((id: string) => {
+    if (editingPdfTextIdRef.current && editingPdfTextIdRef.current !== id) {
+      setEditingPdfTextId(null);
+    }
+    setSelectedPdfTextId(id);
+    setSelectedPdfImageId(null);
+  }, []);
+
+  const handleStartEditPdfTextElement = useCallback(
+    (id: string) => {
+      saveSnapshot();
+      setSelectedPdfTextId(id);
+      setEditingPdfTextId(id);
+      setSelectedPdfImageId(null);
+    },
+    [saveSnapshot]
+  );
+
+  const handleStopEditPdfTextElement = useCallback(() => {
+    setEditingPdfTextId(null);
+  }, []);
+
+  const handleDeselectPdfTextElement = useCallback(() => {
+    setEditingPdfTextId(null);
+    setSelectedPdfTextId(null);
+  }, []);
+
+  const handleUpdatePdfTextStyle = useCallback(
+    (
+      updated: Partial<{
+        fontSizePt: number;
+        fontFamily: PdfFontFamily;
+        bold: boolean;
+        italic: boolean;
+        underline: boolean;
+        color: string;
+        align: PdfTextAlign;
+        wrap: boolean;
+      }>
+    ) => {
+      setPdfDefaultTextStyle((prev) => ({ ...prev, ...updated }));
+      const targetId = editingPdfTextIdRef.current || selectedPdfTextIdRef.current;
+      if (targetId) {
+        saveSnapshot();
+        setPdfTextElements((prev) =>
+          prev.map((item) =>
+            item.id === targetId ? { ...item, ...updated, status: 'edited' as const } : item
+          )
+        );
+      }
+    },
+    [saveSnapshot]
+  );
+
+  const insertPdfImageDataUrl = useCallback(
+    (dataUrl: string) => {
+      const targetPageId = currentPageIdRef.current;
+      const targetPage = pagesRef.current.find((p) => p.id === targetPageId) || pagesRef.current[0];
+      const pageAspect =
+        targetPage?.aspectRatio ||
+        (targetPage?.pdfWidth && targetPage?.pdfHeight
+          ? targetPage.pdfWidth / targetPage.pdfHeight
+          : 8.5 / 11);
+      const recorded = getRecordedPageStageSize(targetPageId);
+      const stageW = recorded?.width || 612;
+      const stageH = recorded?.height || stageW / pageAspect;
+
+      const img = new Image();
+      img.onload = () => {
+        const natW = img.naturalWidth || 320;
+        const natH = img.naturalHeight || 240;
+        const imgAspect = natW / natH;
+        const drawPxW = Math.min(stageW * 0.55, Math.max(80, natW));
+        let drawPxH = drawPxW / imgAspect;
+        let finalPxW = drawPxW;
+        if (drawPxH > stageH * 0.55) {
+          drawPxH = stageH * 0.55;
+          finalPxW = drawPxH * imgAspect;
+        }
+        const nw = Math.max(0.06, Math.min(0.88, finalPxW / stageW));
+        const nh = Math.max(0.06, Math.min(0.88, drawPxH / stageH));
+        const nx = Math.max(0.04, (1 - nw) / 2);
+        const ny = Math.max(0.04, (1 - nh) / 2);
+
+        const newEl: PdfImageElement = {
+          id: `pdf-img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          pageId: targetPageId,
+          origin: 'added',
+          status: 'edited',
+          dataUrl,
+          nx,
+          ny,
+          nw,
+          nh,
+          rotation: 0,
+          crop: { top: 0, right: 0, bottom: 0, left: 0 },
+          naturalWidth: natW,
+          naturalHeight: natH,
+        };
+        saveSnapshot();
+        setPdfImageElements((prev) => [...prev, newEl]);
+        setSelectedPdfImageId(newEl.id);
+        setSelectedPdfTextId(null);
+        setEditingPdfTextId(null);
+        setPdfEditorTool('select');
+      };
+      img.src = dataUrl;
+    },
+    [saveSnapshot]
+  );
+
+  const handleInsertPdfImageFile = useCallback(
+    (file: File) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const url = ev.target?.result;
+        if (typeof url === 'string' && url) {
+          insertPdfImageDataUrl(url);
+        }
+      };
+      reader.readAsDataURL(file);
+    },
+    [insertPdfImageDataUrl]
+  );
+
+  const handlePastePdfImageFromClipboard = useCallback(async () => {
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard?.read) {
+        setAppStatusNotice({
+          kind: 'info',
+          message: 'Press Ctrl+V / Cmd+V on your keyboard to paste an image into the PDF.',
+        });
+        return;
+      }
+      const items = await navigator.clipboard.read();
+      for (const clipItem of items) {
+        const imgType = clipItem.types.find((t) => t.startsWith('image/'));
+        if (imgType) {
+          const blob = await clipItem.getType(imgType);
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const url = ev.target?.result;
+            if (typeof url === 'string' && url) {
+              insertPdfImageDataUrl(url);
+            }
+          };
+          reader.readAsDataURL(blob);
+          return;
+        }
+      }
+      setAppStatusNotice({
+        kind: 'info',
+        message: 'No image found on clipboard. Copy an image first or press Ctrl+V.',
+      });
+    } catch {
+      setAppStatusNotice({
+        kind: 'info',
+        message: 'Clipboard button blocked — press Ctrl+V / Cmd+V directly to paste an image.',
+      });
+    }
+  }, [insertPdfImageDataUrl]);
+
+  const handleUpdatePdfImageElement = useCallback(
+    (id: string, updated: Partial<PdfImageElement>) => {
+      setPdfImageElements((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, ...updated } : item))
+      );
+    },
+    []
+  );
+
+  const handleDeletePdfImageElement = useCallback(
+    (id: string) => {
+      saveSnapshot();
+      setPdfImageElements((prev) =>
+        prev.flatMap((item) => {
+          if (item.id !== id) return [item];
+          if (item.origin === 'native') {
+            return [{ ...item, status: 'deleted' as const }];
+          }
+          return [];
+        })
+      );
+      if (selectedPdfImageIdRef.current === id) setSelectedPdfImageId(null);
+    },
+    [saveSnapshot]
+  );
+
+  const handleSelectPdfImageElement = useCallback((id: string) => {
+    setSelectedPdfImageId(id);
+    setSelectedPdfTextId(null);
+    setEditingPdfTextId(null);
+  }, []);
+
+  const handleDeselectPdfImageElement = useCallback(() => {
+    setSelectedPdfImageId(null);
+  }, []);
 
   // Support physical keyboard typing directly while grid dimensions keypad is open
   useEffect(() => {
@@ -3228,15 +3745,23 @@ export default function App() {
     scrollToPage(id);
   };
 
-  const handleAddPage = async (template: PaperTemplate) => {
+  const handleAddPage = async (template: PaperTemplate, anchorPageIdOverride?: string) => {
     await captureAllMountedWidgets();
+    const anchorPageId = anchorPageIdOverride || currentPageIdRef.current;
     const newPage: PageData = {
-      id: `page-${Date.now()}`,
-      title: `Page ${pages.length + 1}`,
+      id: `page-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      title: `Page ${pagesRef.current.length + 1}`,
       template,
       aspectRatio: 8.5 / 11,
     };
-    setPages((prev) => [...prev, newPage]);
+    setPages((prev) => {
+      const idx = prev.findIndex((p) => p.id === anchorPageId);
+      const insertAt = idx !== -1 ? idx + 1 : prev.length;
+      const next = [...prev];
+      next.splice(insertAt, 0, newPage);
+      return next;
+    });
+    currentPageIdRef.current = newPage.id;
     setCurrentPageId(newPage.id);
     scrollToPage(newPage.id);
   };
@@ -3358,6 +3883,12 @@ export default function App() {
     setCalculators([]);
     setImages([]);
     setDictatedTextBoxes([]);
+    setPdfTextElements([]);
+    setPdfImageElements([]);
+    setSelectedPdfTextId(null);
+    setEditingPdfTextId(null);
+    setSelectedPdfImageId(null);
+    extractedPdfPageIdsRef.current.clear();
     setActiveFileContext(null);
     invalidateAllWidgetSnapshots();
   };
@@ -3420,6 +3951,10 @@ export default function App() {
           stopDictation();
           setActiveDictateBoxId(null);
           setSelectedDictateBoxId(null);
+          setSelectedPdfTextId(null);
+          setEditingPdfTextId(null);
+          setSelectedPdfImageId(null);
+          extractedPdfPageIdsRef.current.clear();
           releaseAllPagesCaches(pages);
           setPages(data.pages);
           setStrokes(data.strokes || []);
@@ -3428,6 +3963,8 @@ export default function App() {
           setCalculators(data.calculators || []);
           setImages(data.images || []);
           setDictatedTextBoxes(data.dictatedTextBoxes || []);
+          setPdfTextElements(data.pdfTextElements || []);
+          setPdfImageElements(data.pdfImageElements || []);
           if (data.pages.length > 0) {
             setCurrentPageId(data.pages[0].id);
             scrollToPage(data.pages[0].id, true);
@@ -3867,7 +4404,9 @@ export default function App() {
         currentPageId,
         images,
         fileName,
-        dictatedTextBoxes
+        dictatedTextBoxes,
+        pdfTextElements,
+        pdfImageElements
       );
       const fileHandle = await writeFileToDirectoryHandle(dirHandle, fileName, blob);
       setActiveFileContext({
@@ -3882,7 +4421,18 @@ export default function App() {
         message: `Saved "${fileName}" to ${pathBreadcrumb}`,
       });
     },
-    [currentPageId, graphs, pages, strokes, shapes, calculators, images, dictatedTextBoxes]
+    [
+      currentPageId,
+      graphs,
+      pages,
+      strokes,
+      shapes,
+      calculators,
+      images,
+      dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements,
+    ]
   );
 
   const handleDownloadFallback = useCallback(
@@ -3905,7 +4455,9 @@ export default function App() {
         currentPageId,
         images,
         fileName,
-        dictatedTextBoxes
+        dictatedTextBoxes,
+        pdfTextElements,
+        pdfImageElements
       );
       triggerDirectBlobDownload(blob, fileName);
       setAppStatusNotice({
@@ -3913,7 +4465,18 @@ export default function App() {
         message: `Saved "${fileName}" to Downloads.`,
       });
     },
-    [currentPageId, graphs, pages, strokes, shapes, calculators, images, dictatedTextBoxes]
+    [
+      currentPageId,
+      graphs,
+      pages,
+      strokes,
+      shapes,
+      calculators,
+      images,
+      dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements,
+    ]
   );
 
   const handleShareFallback = useCallback(
@@ -3936,7 +4499,9 @@ export default function App() {
         currentPageId,
         images,
         fileName,
-        dictatedTextBoxes
+        dictatedTextBoxes,
+        pdfTextElements,
+        pdfImageElements
       );
       const shareResult = await shareFileWithSystemSheet(blob, fileName, mimeType);
       if (shareResult === 'shared') {
@@ -3952,7 +4517,18 @@ export default function App() {
         });
       }
     },
-    [currentPageId, graphs, pages, strokes, shapes, calculators, images, dictatedTextBoxes]
+    [
+      currentPageId,
+      graphs,
+      pages,
+      strokes,
+      shapes,
+      calculators,
+      images,
+      dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements,
+    ]
   );
 
   const executeActualSaveAs = (saveMode: SaveAsMode, options?: { forceSaveAs?: boolean }) => {
@@ -3983,7 +4559,9 @@ export default function App() {
       images,
       suggestedName,
       forceNew ? undefined : activeFileContext?.fileHandle,
-      dictatedTextBoxes
+      dictatedTextBoxes,
+      pdfTextElements,
+      pdfImageElements
     ).then((result) => {
       if (result.status === 'saved') {
         if (result.fileHandle) {
@@ -4117,6 +4695,44 @@ export default function App() {
     return map;
   }, [dictatedTextBoxes]);
 
+  const pdfTextsByPage = useMemo(() => {
+    const map = new Map<string, PdfTextElement[]>();
+    for (let i = 0; i < pdfTextElements.length; i++) {
+      const item = pdfTextElements[i];
+      let arr = map.get(item.pageId);
+      if (!arr) {
+        arr = [];
+        map.set(item.pageId, arr);
+      }
+      arr.push(item);
+    }
+    return map;
+  }, [pdfTextElements]);
+
+  const pdfImagesByPage = useMemo(() => {
+    const map = new Map<string, PdfImageElement[]>();
+    for (let i = 0; i < pdfImageElements.length; i++) {
+      const item = pdfImageElements[i];
+      let arr = map.get(item.pageId);
+      if (!arr) {
+        arr = [];
+        map.set(item.pageId, arr);
+      }
+      arr.push(item);
+    }
+    return map;
+  }, [pdfImageElements]);
+
+  const selectedPdfText = useMemo(
+    () => pdfTextElements.find((t) => t.id === selectedPdfTextId && t.status !== 'deleted') || null,
+    [pdfTextElements, selectedPdfTextId]
+  );
+
+  const selectedPdfImage = useMemo(
+    () => pdfImageElements.find((im) => im.id === selectedPdfImageId && im.status !== 'deleted') || null,
+    [pdfImageElements, selectedPdfImageId]
+  );
+
   const stageMode = mode === 'presenter' ? 'drawing' : mode;
   const isBottomMicVisible =
     !isViewerTab &&
@@ -4225,6 +4841,8 @@ export default function App() {
               presenterMode={presenterMode}
               onClosePresenter={() => {}}
               dictatedTextBoxes={dictatedBoxesByPage.get(currentPageId) ?? EMPTY_DICTATED}
+              pdfTextElements={pdfTextsByPage.get(currentPageId) ?? EMPTY_PDF_TEXTS}
+              pdfImageElements={pdfImagesByPage.get(currentPageId) ?? EMPTY_PDF_IMAGES}
               strokes={strokes}
               shapes={shapes}
               graphs={graphs}
@@ -4403,6 +5021,42 @@ export default function App() {
         onToggleModeBarCollapsed={() => setIsModeBarCollapsed((prev) => !prev)}
         uiScale={uiScale}
         onSetUiScale={handleSetUiScale}
+        pdfEditorTool={pdfEditorTool}
+        onSetPdfEditorTool={(tool) => {
+          setPdfEditorTool(tool);
+          if (tool !== 'select') {
+            setSelectedPdfTextId(null);
+            setEditingPdfTextId(null);
+            setSelectedPdfImageId(null);
+          }
+        }}
+        pdfDefaultTextStyle={pdfDefaultTextStyle}
+        onUpdatePdfTextStyle={handleUpdatePdfTextStyle}
+        selectedPdfText={selectedPdfText}
+        selectedPdfImage={selectedPdfImage}
+        onStartEditSelectedPdfText={() => {
+          if (selectedPdfTextId) handleStartEditPdfTextElement(selectedPdfTextId);
+        }}
+        onDeleteSelectedPdfElement={() => {
+          if (selectedPdfTextId) handleDeletePdfTextElement(selectedPdfTextId);
+          else if (selectedPdfImageId) handleDeletePdfImageElement(selectedPdfImageId);
+        }}
+        onRotateSelectedPdfImage={(deltaDeg) => {
+          if (!selectedPdfImage) return;
+          saveSnapshot();
+          let nextRot = (selectedPdfImage.rotation || 0) + deltaDeg;
+          while (nextRot >= 180) nextRot -= 360;
+          while (nextRot < -180) nextRot += 360;
+          handleUpdatePdfImageElement(selectedPdfImage.id, {
+            status: 'edited',
+            rotation: nextRot,
+          });
+        }}
+        onInsertPdfImageFile={handleInsertPdfImageFile}
+        onPastePdfImage={() => void handlePastePdfImageFromClipboard()}
+        onRescanPdfLayers={() => void handleRescanPdfLayers()}
+        isCurrentPagePdf={currentPage?.template === 'pdf'}
+        isExtractingPdfLayers={isExtractingPdfLayers}
       />
 
       {/* 2. MAIN VIRTUALIZED WORKSPACE CANVAS (Only viewport-visible pages load; off-screen pages stay blurry placeholders) */}
@@ -4570,13 +5224,16 @@ export default function App() {
                 (e.pointerType === 'pen' ||
                   stageMode === 'drawing' ||
                   stageMode === 'geometric' ||
-                  stageMode === 'dictate')
+                  stageMode === 'dictate' ||
+                  stageMode === 'pdf_editor')
               ) {
                 return;
               }
               lastRightEdgeInputAtRef.current = Date.now();
               const isInWidget = Boolean(
-                targetEl?.closest('.desmos-box, .calculator-box, .image-box, [data-testid="right-edge-scrollbar"]')
+                targetEl?.closest(
+                  '.desmos-box, .calculator-box, .image-box, .pdf-text-element, .pdf-image-element, [data-testid="right-edge-scrollbar"]'
+                )
               );
               if (e.pointerType !== 'touch' && !isInWidget && e.clientX >= rect.right - 64 && e.clientX < rect.right - 12) {
                 rightEdgeSwipeRef.current = {
@@ -4687,6 +5344,24 @@ export default function App() {
                 onStopManualEditDictateBox={handleStopManualEditDictateBox}
                 onClickOutsideDictateBox={handleClickOutsideDictateBox}
                 onDeselectDictateBox={handleDeselectDictateBox}
+                pdfEditorTool={pdfEditorTool}
+                pdfDefaultTextStyle={pdfDefaultTextStyle}
+                pdfTextElements={pdfTextsByPage.get(page.id) ?? EMPTY_PDF_TEXTS}
+                pdfImageElements={pdfImagesByPage.get(page.id) ?? EMPTY_PDF_IMAGES}
+                selectedPdfTextId={selectedPdfTextId}
+                editingPdfTextId={editingPdfTextId}
+                selectedPdfImageId={selectedPdfImageId}
+                onAddPdfTextElement={handleAddPdfTextElement}
+                onUpdatePdfTextElement={handleUpdatePdfTextElement}
+                onDeletePdfTextElement={handleDeletePdfTextElement}
+                onSelectPdfTextElement={handleSelectPdfTextElement}
+                onStartEditPdfTextElement={handleStartEditPdfTextElement}
+                onStopEditPdfTextElement={handleStopEditPdfTextElement}
+                onDeselectPdfTextElement={handleDeselectPdfTextElement}
+                onUpdatePdfImageElement={handleUpdatePdfImageElement}
+                onDeletePdfImageElement={handleDeletePdfImageElement}
+                onSelectPdfImageElement={handleSelectPdfImageElement}
+                onDeselectPdfImageElement={handleDeselectPdfImageElement}
                 strokes={strokesByPage.get(page.id) ?? EMPTY_STROKES}
                 shapes={shapesByPage.get(page.id) ?? EMPTY_SHAPES}
                 graphs={graphsByPage.get(page.id) ?? EMPTY_GRAPHS}
@@ -4786,7 +5461,10 @@ export default function App() {
                     type="button"
                     onClick={() => {
                       setIsBottomAddPageOpen(false);
-                      void handleAddPage(id);
+                      const activeTarget =
+                        pages[Math.max(0, Math.min(pages.length - 1, scrollPageNumber - 1))] ||
+                        currentPage;
+                      void handleAddPage(id, activeTarget?.id);
                     }}
                     className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-blue-50 dark:hover:bg-slate-800 hover:text-blue-600 dark:hover:text-blue-400 transition-colors text-left"
                   >
@@ -4963,37 +5641,41 @@ export default function App() {
       )}
 
       {/* 5.5 BOTTOM ON-SCREEN KEYBOARD FOR TEXT BOXES & GRID DIMENSIONS */}
-      {!isViewerTab && (editingDictateBoxId !== null || editingGridDims !== null) && (
-        <OnScreenKeyboard
-          headerTitle={
-            editingGridDims
-              ? `Grid ${editingGridDims.field === 'cols' ? 'Columns (X)' : 'Rows (Y)'} · On-Screen Keypad`
-              : undefined
-          }
-          onKeyAction={handleVirtualKeyAction}
-          onSwitchToDictate={
-            editingDictateBoxId !== null
-              ? () => {
-                  const boxId = editingDictateBoxId;
-                  setEditingDictateBoxId(null);
-                  if (boxId) {
-                    handleResumeDictateBox(boxId);
+      {!isViewerTab &&
+        (editingDictateBoxId !== null || editingPdfTextId !== null || editingGridDims !== null) && (
+          <OnScreenKeyboard
+            headerTitle={
+              editingGridDims
+                ? `Grid ${editingGridDims.field === 'cols' ? 'Columns (X)' : 'Rows (Y)'} · On-Screen Keypad`
+                : editingPdfTextId !== null
+                ? 'PDF Editor Text · On-Screen Keyboard'
+                : undefined
+            }
+            onKeyAction={handleVirtualKeyAction}
+            onSwitchToDictate={
+              editingDictateBoxId !== null
+                ? () => {
+                    const boxId = editingDictateBoxId;
+                    setEditingDictateBoxId(null);
+                    if (boxId) {
+                      handleResumeDictateBox(boxId);
+                    }
                   }
-                }
-              : undefined
-          }
-          onClose={() => {
-            if (editingGridDims) handleStopEditGridDims();
-            if (editingDictateBoxId) handleStopManualEditDictateBox();
-          }}
-        />
-      )}
+                : undefined
+            }
+            onClose={() => {
+              if (editingGridDims) handleStopEditGridDims();
+              if (editingDictateBoxId) handleStopManualEditDictateBox();
+              if (editingPdfTextId) handleStopEditPdfTextElement();
+            }}
+          />
+        )}
 
       {/* 6. NON-BLOCKING FILE STATUS TOAST */}
       {appStatusNotice && (
         <div
           className={`fixed ${
-            editingDictateBoxId !== null || editingGridDims !== null
+            editingDictateBoxId !== null || editingPdfTextId !== null || editingGridDims !== null
               ? 'top-20'
               : isBottomMicVisible
               ? 'bottom-24'

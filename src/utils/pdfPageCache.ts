@@ -16,7 +16,27 @@ const MAX_CACHED_TILES = 84;
 const MAX_CACHED_FULL_PAGES = 6;
 
 const pdfDocsBySourceId = new Map<string, PDFDoc>();
+const pdfRawBytesBySourceId = new Map<string, Uint8Array>();
 const imageSourcesById = new Map<string, { dataUrl: string; img?: HTMLImageElement }>();
+
+export function getPdfRawBytes(sourceId?: string): Uint8Array | undefined {
+  if (!sourceId) return undefined;
+  return pdfRawBytesBySourceId.get(sourceId);
+}
+
+export function getPdfDocProxy(sourceId?: string): PDFDoc | undefined {
+  if (!sourceId) return undefined;
+  return pdfDocsBySourceId.get(sourceId);
+}
+
+export function hasPdfDocumentSource(sourceId?: string): boolean {
+  return Boolean(sourceId && pdfDocsBySourceId.has(sourceId));
+}
+
+export function getImageSourceDataUrl(sourceId?: string): string | undefined {
+  if (!sourceId) return undefined;
+  return imageSourcesById.get(sourceId)?.dataUrl;
+}
 
 // Insertion-ordered Map acts as LRU cache for rendered tile blob URLs
 const tileUrlCache = new Map<string, string>();
@@ -266,13 +286,15 @@ export async function registerPdfDocumentSource(file: File): Promise<PageData[]>
 
   try {
     const arrayBuffer = await file.arrayBuffer();
+    const rawBytes = new Uint8Array(arrayBuffer);
     const loadingTask = pdfjsLib.getDocument({
-      data: new Uint8Array(arrayBuffer.slice(0)),
+      data: rawBytes.slice(),
       useSystemFonts: true,
     });
 
     const pdf = await loadingTask.promise;
     pdfDocsBySourceId.set(sourceId, pdf);
+    pdfRawBytesBySourceId.set(sourceId, rawBytes);
 
     const numPages = pdf.numPages;
     const pages: PageData[] = [];

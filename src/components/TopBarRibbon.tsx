@@ -58,6 +58,16 @@ import {
   Minimize2,
   MicOff,
   CheckCircle2,
+  FilePenLine,
+  MousePointer,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  ImagePlus,
+  RotateCw,
+  RotateCcw,
+  RefreshCw,
+  WrapText,
 } from 'lucide-react';
 import {
   AngleNegativeDirection,
@@ -76,6 +86,11 @@ import {
   StylusDetectionConfig,
   ExplorerFileItem,
   ActiveFileContext,
+  PdfEditorTool,
+  PdfFontFamily,
+  PdfTextAlign,
+  PdfTextElement,
+  PdfImageElement,
 } from '../types';
 import { MicPermissionState } from '../utils/speechDictation';
 import { hsvToHex, hexToHsv, hexWithAlphaPercent } from '../utils/colorUtils';
@@ -238,6 +253,42 @@ interface TopBarRibbonProps {
   // Top mode bar & popup UI scale
   uiScale?: number;
   onSetUiScale?: (scale: number) => void;
+
+  // PDF Editor mode props
+  pdfEditorTool?: PdfEditorTool;
+  onSetPdfEditorTool?: (tool: PdfEditorTool) => void;
+  pdfDefaultTextStyle?: {
+    fontSizePt: number;
+    fontFamily: PdfFontFamily;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    color: string;
+    align: PdfTextAlign;
+    wrap: boolean;
+  };
+  onUpdatePdfTextStyle?: (
+    updated: Partial<{
+      fontSizePt: number;
+      fontFamily: PdfFontFamily;
+      bold: boolean;
+      italic: boolean;
+      underline: boolean;
+      color: string;
+      align: PdfTextAlign;
+      wrap: boolean;
+    }>
+  ) => void;
+  selectedPdfText?: PdfTextElement | null;
+  selectedPdfImage?: PdfImageElement | null;
+  onStartEditSelectedPdfText?: () => void;
+  onDeleteSelectedPdfElement?: () => void;
+  onRotateSelectedPdfImage?: (deltaDeg: number) => void;
+  onInsertPdfImageFile?: (file: File) => void;
+  onPastePdfImage?: () => void;
+  onRescanPdfLayers?: () => void;
+  isCurrentPagePdf?: boolean;
+  isExtractingPdfLayers?: boolean;
 }
 
 export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
@@ -346,6 +397,29 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   onToggleModeBarCollapsed,
   uiScale = 1,
   onSetUiScale,
+  pdfEditorTool = 'select',
+  onSetPdfEditorTool,
+  pdfDefaultTextStyle = {
+    fontSizePt: 14,
+    fontFamily: 'Helvetica',
+    bold: false,
+    italic: false,
+    underline: false,
+    color: '#000000',
+    align: 'left',
+    wrap: true,
+  },
+  onUpdatePdfTextStyle,
+  selectedPdfText = null,
+  selectedPdfImage = null,
+  onStartEditSelectedPdfText,
+  onDeleteSelectedPdfElement,
+  onRotateSelectedPdfImage,
+  onInsertPdfImageFile,
+  onPastePdfImage,
+  onRescanPdfLayers,
+  isCurrentPagePdf = false,
+  isExtractingPdfLayers = false,
 }) => {
   // Fullscreen toggle state synced with browser fullscreen events (standard + WebKit Safari)
   const [isFullscreen, setIsFullscreen] = useState<boolean>(() => {
@@ -463,6 +537,28 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   const [showPresenterToolMenu, setShowPresenterToolMenu] = useState(false);
   const [showTemplateMenu, setShowTemplateMenu] = useState(false);
   const [showAddPageOptions, setShowAddPageOptions] = useState(false);
+
+  // PDF Editor formatting popups & font size draft
+  const [showPdfFontSizeMenu, setShowPdfFontSizeMenu] = useState(false);
+  const [showPdfFontFamilyMenu, setShowPdfFontFamilyMenu] = useState(false);
+  const [showPdfColorMenu, setShowPdfColorMenu] = useState(false);
+  const [showPdfAlignMenu, setShowPdfAlignMenu] = useState(false);
+  const activePdfTextStyle = selectedPdfText
+    ? {
+        fontSizePt: selectedPdfText.fontSizePt,
+        fontFamily: selectedPdfText.fontFamily,
+        bold: selectedPdfText.bold,
+        italic: selectedPdfText.italic,
+        underline: selectedPdfText.underline,
+        color: selectedPdfText.color,
+        align: selectedPdfText.align,
+        wrap: selectedPdfText.wrap,
+      }
+    : pdfDefaultTextStyle;
+  const [pdfFontPtDraft, setPdfFontPtDraft] = useState<string>(String(activePdfTextStyle.fontSizePt));
+  useEffect(() => {
+    setPdfFontPtDraft(String(Math.round(activePdfTextStyle.fontSizePt)));
+  }, [activePdfTextStyle.fontSizePt]);
 
   useEffect(() => {
     ensureTouchGeometryTracker();
@@ -597,11 +693,16 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
 
   // File input & popover trigger refs
   const pdfInputRef = useRef<HTMLInputElement>(null);
+  const pdfImageInsertInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const colorSlidersBtnRef = useRef<HTMLButtonElement>(null);
   const paletteOverflowBtnRef = useRef<HTMLButtonElement>(null);
   const presenterMenuBtnRef = useRef<HTMLButtonElement>(null);
   const templateMenuBtnRef = useRef<HTMLButtonElement>(null);
+  const pdfFontSizeBtnRef = useRef<HTMLButtonElement>(null);
+  const pdfFontFamilyBtnRef = useRef<HTMLButtonElement>(null);
+  const pdfColorBtnRef = useRef<HTMLButtonElement>(null);
+  const pdfAlignBtnRef = useRef<HTMLButtonElement>(null);
 
   // Collapsible Mode Select Bar animation state
   const [internalModeBarCollapsed, setInternalModeBarCollapsed] = useState(false);
@@ -708,11 +809,26 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
             if (geoIdx >= 0) parsed.splice(geoIdx + 1, 0, 'dictate');
             else parsed.push('dictate');
           }
+          if (!parsed.includes('pdf_editor')) {
+            const dicIdx = parsed.indexOf('dictate');
+            if (dicIdx >= 0) parsed.splice(dicIdx + 1, 0, 'pdf_editor');
+            else parsed.push('pdf_editor');
+          }
           return parsed;
         }
       }
     } catch {}
-    return ['drawing', 'calculator', 'graphing', 'geometric', 'dictate', 'edit', 'presenter', 'touch_controls'];
+    return [
+      'drawing',
+      'calculator',
+      'graphing',
+      'geometric',
+      'dictate',
+      'pdf_editor',
+      'edit',
+      'presenter',
+      'touch_controls',
+    ];
   });
 
   const [draggedMode, setDraggedMode] = useState<AppMode | null>(null);
@@ -776,6 +892,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     graphing: { id: 'graphing', label: 'Graphing (Desmos)', icon: LineChart, color: 'text-indigo-600' },
     geometric: { id: 'geometric', label: 'Geometric', icon: Shapes, color: 'text-amber-600' },
     dictate: { id: 'dictate', label: 'Dictate', icon: Mic, color: 'text-sky-600' },
+    pdf_editor: { id: 'pdf_editor', label: 'PDF Editor', icon: FilePenLine, color: 'text-teal-600' },
     edit: { id: 'edit', label: 'Edit', icon: Eraser, color: 'text-rose-600' },
     presenter: { id: 'presenter', label: 'Presenter Mode', icon: Presentation, color: 'text-purple-600' },
     touch_controls: { id: 'touch_controls', label: 'Touch Controls', icon: Touchpad, color: 'text-cyan-600' },
@@ -2946,6 +3063,531 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {/* ============================================================== */}
+        {/* PDF EDITOR MODE RIBBON (Acrobat-compatible Native PDF Layer)   */}
+        {/* ============================================================== */}
+        {mode === 'pdf_editor' && (
+          <div data-tour-id="pdf-editor-tools" data-testid="pdf-editor-ribbon" className="flex items-center gap-2.5 flex-wrap w-full">
+            {/* Hidden File Explorer Image Input */}
+            <input
+              ref={pdfImageInsertInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) {
+                  onInsertPdfImageFile?.(f);
+                }
+                e.currentTarget.value = '';
+              }}
+            />
+
+            {/* PDF Tool Selection + Text Box Placement Modes */}
+            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl flex-wrap">
+              <button
+                type="button"
+                data-testid="pdf-tool-select"
+                onClick={() => onSetPdfEditorTool?.('select')}
+                title="Click or double-click native PDF text & images to edit, move, crop, rotate, or delete"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  pdfEditorTool === 'select'
+                    ? 'bg-white dark:bg-slate-900 text-teal-600 dark:text-teal-400 shadow-xs font-semibold'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                }`}
+              >
+                <MousePointer className="w-3.5 h-3.5" />
+                <span>Select / Edit</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="pdf-tool-height"
+                onClick={() => onSetPdfEditorTool?.('height')}
+                title="Drag vertically to set PDF text height (expands right, physical or on-screen keyboard)"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  pdfEditorTool === 'height'
+                    ? 'bg-white dark:bg-slate-900 text-teal-600 dark:text-teal-400 shadow-xs font-semibold'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                }`}
+              >
+                <MoveVertical className="w-3.5 h-3.5" />
+                <span>Text Height</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="pdf-tool-dimensions"
+                onClick={() => onSetPdfEditorTool?.('dimensions')}
+                title="Draw a 2D PDF text box; text wraps within the box"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  pdfEditorTool === 'dimensions'
+                    ? 'bg-white dark:bg-slate-900 text-teal-600 dark:text-teal-400 shadow-xs font-semibold'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                }`}
+              >
+                <BoxSelect className="w-3.5 h-3.5" />
+                <span>Add Text Box</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="pdf-tool-constant-font"
+                onClick={() => onSetPdfEditorTool?.('constant_font')}
+                title="Draw horizontal line for wrap width using current pt size"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  pdfEditorTool === 'constant_font'
+                    ? 'bg-white dark:bg-slate-900 text-teal-600 dark:text-teal-400 shadow-xs font-semibold'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                }`}
+              >
+                <Type className="w-3.5 h-3.5" />
+                <span>Constant Font</span>
+              </button>
+            </div>
+
+            {/* Acrobat-style Dark Formatting Bar: B  I  U  tT  Ag  ColorCircle  Align */}
+            <div
+              data-testid="pdf-format-bar"
+              className="flex items-center gap-1 px-2 py-1 rounded-xl bg-[#1E1E20] text-slate-200 border border-slate-700/80 shadow-xs select-none"
+            >
+              {/* Bold */}
+              <button
+                type="button"
+                data-testid="pdf-fmt-bold"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onUpdatePdfTextStyle?.({ bold: !activePdfTextStyle.bold })}
+                title="Bold"
+                aria-pressed={activePdfTextStyle.bold}
+                className={`dcg-do-not-blur w-7 h-7 rounded-lg flex items-center justify-center text-sm font-black transition-colors cursor-pointer ${
+                  activePdfTextStyle.bold
+                    ? 'bg-sky-500/25 text-sky-400 ring-1 ring-sky-400/60'
+                    : 'hover:bg-white/10 text-slate-200'
+                }`}
+              >
+                B
+              </button>
+
+              {/* Italic */}
+              <button
+                type="button"
+                data-testid="pdf-fmt-italic"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onUpdatePdfTextStyle?.({ italic: !activePdfTextStyle.italic })}
+                title="Italic"
+                aria-pressed={activePdfTextStyle.italic}
+                className={`dcg-do-not-blur w-7 h-7 rounded-lg flex items-center justify-center text-base font-serif italic transition-colors cursor-pointer ${
+                  activePdfTextStyle.italic
+                    ? 'bg-sky-500/25 text-sky-400 ring-1 ring-sky-400/60'
+                    : 'hover:bg-white/10 text-slate-200'
+                }`}
+              >
+                I
+              </button>
+
+              {/* Underline */}
+              <button
+                type="button"
+                data-testid="pdf-fmt-underline"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onUpdatePdfTextStyle?.({ underline: !activePdfTextStyle.underline })}
+                title="Underline"
+                aria-pressed={activePdfTextStyle.underline}
+                className={`dcg-do-not-blur w-7 h-7 rounded-lg flex items-center justify-center text-sm font-medium underline underline-offset-2 transition-colors cursor-pointer ${
+                  activePdfTextStyle.underline
+                    ? 'bg-sky-500/25 text-sky-400 ring-1 ring-sky-400/60'
+                    : 'hover:bg-white/10 text-slate-200'
+                }`}
+              >
+                U
+              </button>
+
+              <div className="w-px h-4 bg-slate-700 mx-0.5" />
+
+              {/* Font Size (tT) */}
+              <button
+                ref={pdfFontSizeBtnRef}
+                type="button"
+                data-testid="pdf-fmt-size"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setShowPdfFontSizeMenu((prev) => !prev);
+                  setShowPdfFontFamilyMenu(false);
+                  setShowPdfColorMenu(false);
+                  setShowPdfAlignMenu(false);
+                }}
+                title={`Font Size (${Math.round(activePdfTextStyle.fontSizePt)}pt)`}
+                className={`dcg-do-not-blur flex items-center gap-1 px-1.5 h-7 rounded-lg transition-colors cursor-pointer ${
+                  showPdfFontSizeMenu
+                    ? 'bg-sky-500/25 text-sky-400 ring-1 ring-sky-400/60'
+                    : 'hover:bg-white/10 text-slate-200'
+                }`}
+              >
+                <span className="inline-flex items-baseline leading-none font-serif font-bold">
+                  <span className="text-[11px]">T</span>
+                  <span className="text-[15px] -ml-0.5">T</span>
+                </span>
+                <span className="font-mono text-[10px] text-slate-400">
+                  {Math.round(activePdfTextStyle.fontSizePt)}pt
+                </span>
+              </button>
+
+              {showPdfFontSizeMenu && (
+                <AnchoredScreenPopup
+                  anchorRef={pdfFontSizeBtnRef}
+                  placement="bottom"
+                  align="start"
+                  gap={8}
+                  zIndexClass="z-[9995]"
+                  onClose={() => setShowPdfFontSizeMenu(false)}
+                >
+                  <div
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="ui-scale-target w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-3 space-y-2.5 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-700 dark:text-slate-200">Font Size (pt)</span>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          min={6}
+                          max={144}
+                          value={pdfFontPtDraft}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setPdfFontPtDraft(raw);
+                            const n = parseFloat(raw);
+                            if (!Number.isNaN(n) && n >= 6 && n <= 144) {
+                              onUpdatePdfTextStyle?.({ fontSizePt: n });
+                            }
+                          }}
+                          className="w-14 px-1.5 py-0.5 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-center font-mono font-semibold text-slate-900 dark:text-slate-100"
+                        />
+                        <span className="text-slate-400 font-mono text-[11px]">pt</span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1">
+                      {[8, 10, 12, 14, 16, 18, 24, 32, 40, 48, 60, 72].map((pt) => (
+                        <button
+                          key={pt}
+                          type="button"
+                          onClick={() => {
+                            onUpdatePdfTextStyle?.({ fontSizePt: pt });
+                            setShowPdfFontSizeMenu(false);
+                          }}
+                          className={`px-1.5 py-1 rounded-md font-mono text-[11px] font-semibold transition-colors ${
+                            Math.round(activePdfTextStyle.fontSizePt) === pt
+                              ? 'bg-teal-600 text-white'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-teal-50 dark:hover:bg-teal-950/60'
+                          }`}
+                        >
+                          {pt}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </AnchoredScreenPopup>
+              )}
+
+              {/* Font Family (Ag) */}
+              <button
+                ref={pdfFontFamilyBtnRef}
+                type="button"
+                data-testid="pdf-fmt-font"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setShowPdfFontFamilyMenu((prev) => !prev);
+                  setShowPdfFontSizeMenu(false);
+                  setShowPdfColorMenu(false);
+                  setShowPdfAlignMenu(false);
+                }}
+                title={`PDF Font (${activePdfTextStyle.fontFamily})`}
+                className={`dcg-do-not-blur px-2 h-7 rounded-lg flex items-center justify-center font-serif text-[15px] tracking-tight transition-colors cursor-pointer ${
+                  showPdfFontFamilyMenu
+                    ? 'bg-sky-500/25 text-sky-400 ring-1 ring-sky-400/60'
+                    : 'hover:bg-white/10 text-slate-200'
+                }`}
+              >
+                Ag
+              </button>
+
+              {showPdfFontFamilyMenu && (
+                <AnchoredScreenPopup
+                  anchorRef={pdfFontFamilyBtnRef}
+                  placement="bottom"
+                  align="start"
+                  gap={8}
+                  zIndexClass="z-[9995]"
+                  onClose={() => setShowPdfFontFamilyMenu(false)}
+                >
+                  <div
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="ui-scale-target w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-1.5 space-y-1 text-xs"
+                  >
+                    <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Standard PDF Font
+                    </div>
+                    {(
+                      [
+                        { id: 'Helvetica', label: 'Helvetica (Sans-Serif)', css: 'Helvetica, Arial, sans-serif' },
+                        { id: 'TimesRoman', label: 'Times Roman (Serif)', css: '"Times New Roman", Georgia, serif' },
+                        { id: 'Courier', label: 'Courier (Monospace)', css: '"Courier New", monospace' },
+                      ] as const
+                    ).map((f) => {
+                      const active = activePdfTextStyle.fontFamily === f.id;
+                      return (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => {
+                            onUpdatePdfTextStyle?.({ fontFamily: f.id });
+                            setShowPdfFontFamilyMenu(false);
+                          }}
+                          style={{ fontFamily: f.css }}
+                          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors ${
+                            active
+                              ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 font-bold'
+                              : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800'
+                          }`}
+                        >
+                          <span>{f.label}</span>
+                          {active && <Check className="w-3.5 h-3.5" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </AnchoredScreenPopup>
+              )}
+
+              {/* Text Color Circle Swatch */}
+              <button
+                ref={pdfColorBtnRef}
+                type="button"
+                data-testid="pdf-fmt-color"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setShowPdfColorMenu((prev) => !prev);
+                  setShowPdfFontSizeMenu(false);
+                  setShowPdfFontFamilyMenu(false);
+                  setShowPdfAlignMenu(false);
+                }}
+                title={`PDF Text Color (${activePdfTextStyle.color})`}
+                className={`dcg-do-not-blur w-7 h-7 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                  showPdfColorMenu ? 'bg-sky-500/25 ring-1 ring-sky-400/60' : 'hover:bg-white/10'
+                }`}
+              >
+                <span
+                  className="w-4 h-4 rounded-full border-2 border-white/85 shadow-inner"
+                  style={{ backgroundColor: activePdfTextStyle.color || '#000000' }}
+                />
+              </button>
+
+              {showPdfColorMenu && (
+                <AnchoredScreenPopup
+                  anchorRef={pdfColorBtnRef}
+                  placement="bottom"
+                  align="start"
+                  gap={8}
+                  zIndexClass="z-[9995]"
+                  onClose={() => setShowPdfColorMenu(false)}
+                >
+                  <div
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="ui-scale-target w-52 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-3 space-y-2.5 text-xs"
+                  >
+                    <div className="font-bold text-slate-700 dark:text-slate-200">PDF Text Color</div>
+                    <div className="grid grid-cols-6 gap-1.5">
+                      {[
+                        '#000000',
+                        '#334155',
+                        '#DC2626',
+                        '#EA580C',
+                        '#D97706',
+                        '#16A34A',
+                        '#0D9488',
+                        '#2563EB',
+                        '#4F46E5',
+                        '#9333EA',
+                        '#DB2777',
+                        '#FFFFFF',
+                      ].map((hex) => (
+                        <button
+                          key={hex}
+                          type="button"
+                          onClick={() => {
+                            onUpdatePdfTextStyle?.({ color: hex });
+                            setShowPdfColorMenu(false);
+                          }}
+                          style={{ backgroundColor: hex }}
+                          className={`w-6 h-6 rounded-full border transition-transform hover:scale-110 ${
+                            (activePdfTextStyle.color || '').toUpperCase() === hex
+                              ? 'ring-2 ring-teal-500 border-white scale-110'
+                              : 'border-slate-300 dark:border-slate-600'
+                          }`}
+                          title={hex}
+                        />
+                      ))}
+                    </div>
+                    <label className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-100 dark:border-slate-800 cursor-pointer">
+                      <span className="text-slate-600 dark:text-slate-300 font-medium">Custom Color:</span>
+                      <input
+                        type="color"
+                        value={activePdfTextStyle.color || '#000000'}
+                        onChange={(e) => onUpdatePdfTextStyle?.({ color: e.target.value })}
+                        className="w-8 h-6 rounded border border-slate-300 cursor-pointer"
+                      />
+                    </label>
+                  </div>
+                </AnchoredScreenPopup>
+              )}
+
+              {/* Text Alignment & Wrap */}
+              <button
+                ref={pdfAlignBtnRef}
+                type="button"
+                data-testid="pdf-fmt-align"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setShowPdfAlignMenu((prev) => !prev);
+                  setShowPdfFontSizeMenu(false);
+                  setShowPdfFontFamilyMenu(false);
+                  setShowPdfColorMenu(false);
+                }}
+                title={`Text Alignment (${activePdfTextStyle.align})`}
+                className={`dcg-do-not-blur w-7 h-7 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
+                  showPdfAlignMenu
+                    ? 'bg-sky-500/25 text-sky-400 ring-1 ring-sky-400/60'
+                    : 'text-sky-400 hover:bg-white/10'
+                }`}
+              >
+                {activePdfTextStyle.align === 'center' ? (
+                  <AlignCenter className="w-4 h-4" />
+                ) : activePdfTextStyle.align === 'right' ? (
+                  <AlignRight className="w-4 h-4" />
+                ) : activePdfTextStyle.align === 'justify' ? (
+                  <AlignJustify className="w-4 h-4" />
+                ) : (
+                  <AlignLeft className="w-4 h-4" />
+                )}
+              </button>
+
+              {showPdfAlignMenu && (
+                <AnchoredScreenPopup
+                  anchorRef={pdfAlignBtnRef}
+                  placement="bottom"
+                  align="start"
+                  gap={8}
+                  zIndexClass="z-[9995]"
+                  onClose={() => setShowPdfAlignMenu(false)}
+                >
+                  <div
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="ui-scale-target w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-2 space-y-1.5 text-xs"
+                  >
+                    <div className="px-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Paragraph Align
+                    </div>
+                    <div className="grid grid-cols-4 gap-1">
+                      {(
+                        [
+                          { id: 'left', label: 'Align Left', Icon: AlignLeft },
+                          { id: 'center', label: 'Align Center', Icon: AlignCenter },
+                          { id: 'right', label: 'Align Right', Icon: AlignRight },
+                          { id: 'justify', label: 'Justify', Icon: AlignJustify },
+                        ] as const
+                      ).map(({ id, label, Icon }) => (
+                        <button
+                          key={id}
+                          type="button"
+                          title={label}
+                          onClick={() => {
+                            onUpdatePdfTextStyle?.({ align: id });
+                            setShowPdfAlignMenu(false);
+                          }}
+                          className={`p-1.5 rounded-lg flex items-center justify-center transition-colors ${
+                            activePdfTextStyle.align === id
+                              ? 'bg-teal-600 text-white'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-teal-50 dark:hover:bg-teal-950/60'
+                          }`}
+                        >
+                          <Icon className="w-3.5 h-3.5" />
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onUpdatePdfTextStyle?.({ wrap: !activePdfTextStyle.wrap })}
+                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg font-medium transition-colors ${
+                        activePdfTextStyle.wrap
+                          ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300'
+                          : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <WrapText className="w-3.5 h-3.5" />
+                        <span>Wrap Text in Box</span>
+                      </span>
+                      {activePdfTextStyle.wrap && <Check className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </AnchoredScreenPopup>
+              )}
+            </div>
+
+            {/* PDF Image Actions: File Explorer & Clipboard Paste */}
+            <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                data-testid="pdf-add-image-file-btn"
+                onClick={() => pdfImageInsertInputRef.current?.click()}
+                title="Insert image from File Explorer as a native PDF image"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-slate-700 dark:text-slate-200 hover:text-teal-700 dark:hover:text-teal-300 font-medium text-xs shadow-xs transition-colors"
+              >
+                <ImagePlus className="w-3.5 h-3.5 text-teal-600" />
+                <span>Add Image</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="pdf-paste-image-btn"
+                onClick={() => onPastePdfImage?.()}
+                title="Paste image from clipboard (or press Ctrl+V) as a native PDF image"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-slate-700 dark:text-slate-200 hover:text-teal-700 dark:hover:text-teal-300 font-medium text-xs shadow-xs transition-colors"
+              >
+                <ClipboardPaste className="w-3.5 h-3.5 text-teal-600" />
+                <span>Paste Image</span>
+              </button>
+            </div>
+
+            {/* Rescan Native PDF Layers & Save Clean Edited PDF */}
+            <div className="flex items-center gap-1.5 ml-auto pl-2 border-l border-slate-200 dark:border-slate-800">
+              {isCurrentPagePdf && (
+                <button
+                  type="button"
+                  data-testid="pdf-rescan-btn"
+                  disabled={isExtractingPdfLayers}
+                  onClick={() => onRescanPdfLayers?.()}
+                  title="Re-scan unmodified native text and images from this PDF page"
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isExtractingPdfLayers ? 'animate-spin' : ''}`} />
+                  <span>{isExtractingPdfLayers ? 'Scanning...' : 'Rescan PDF'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid="pdf-save-clean-btn"
+                onClick={() => onSaveAs('pdf_clean')}
+                title="Export true editable Adobe Acrobat-compatible PDF"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-xs transition-colors whitespace-nowrap"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>Save Edited PDF</span>
+              </button>
+            </div>
           </div>
         )}
 
