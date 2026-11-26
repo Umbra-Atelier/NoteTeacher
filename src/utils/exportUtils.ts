@@ -22,7 +22,7 @@ import {
 } from './widgetSnapshotCache';
 import { getPdfRawBytes, resolvePdfPageDataUrl } from './pdfPageCache';
 import { buildNativeEditedPdfBlob } from './pdfNativeWriter';
-import { getBrightHighlighterColor, getHighlighterDodgeColor } from './colorUtils';
+import { getBrightHighlighterColor } from './colorUtils';
 
 export interface ProjectData {
   version: string;
@@ -785,26 +785,14 @@ function drawFreehandStroke(
 
   if (!s.isGhosted && s.tool === 'highlighter') {
     const brightHex = getBrightHighlighterColor(s.color);
-    const dodgeHex = getHighlighterDodgeColor(brightHex);
-    const passes: Array<{
-      op: GlobalCompositeOperation;
-      color: string;
-      alpha: number;
-    }> = [
-      { op: 'color-dodge', color: dodgeHex, alpha: 0.88 },
-      { op: 'color-burn', color: brightHex, alpha: 0.55 },
-      { op: 'multiply', color: brightHex, alpha: s.opacity || 0.52 },
-    ];
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = Math.max(0.78, s.opacity || 0.85);
+    ctx.strokeStyle = brightHex;
+    ctx.fillStyle = brightHex;
     ctx.lineWidth = s.width * avgScale;
-    for (const pass of passes) {
-      ctx.globalCompositeOperation = pass.op;
-      ctx.globalAlpha = pass.alpha;
-      ctx.strokeStyle = pass.color;
-      ctx.fillStyle = pass.color;
-      const isDot = traceStrokePath();
-      if (isDot) ctx.fill();
-      else ctx.stroke();
-    }
+    const isDot = traceStrokePath();
+    if (isDot) ctx.fill();
+    else ctx.stroke();
     ctx.restore();
     return;
   }
@@ -1608,12 +1596,19 @@ async function renderPageToCanvas(
     }
   }
 
-  // 5. Draw Vector Geometric Shapes (including angle arcs) & Ink Strokes (`z-35`)
+  // 5. Draw Highlighter Strokes (`z-34`) cleanly below Shapes & Ink (`z-35`)
+  for (const s of pageStrokes) {
+    if (!s.isGhosted && s.tool === 'highlighter') {
+      drawFreehandStroke(ctx, s, scaleX, scaleY, avgScale, isClean);
+    }
+  }
   for (const sh of pageShapes) {
     drawVectorShape(ctx, sh, scaleX, scaleY, avgScale, isClean);
   }
   for (const s of pageStrokes) {
-    drawFreehandStroke(ctx, s, scaleX, scaleY, avgScale, isClean);
+    if (s.isGhosted || s.tool !== 'highlighter') {
+      drawFreehandStroke(ctx, s, scaleX, scaleY, avgScale, isClean);
+    }
   }
   for (const box of pageDictated) {
     drawDictatedTextBox(ctx, box, scaleX, scaleY, avgScale, isClean);

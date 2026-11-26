@@ -14,7 +14,7 @@ import {
   getCachedDesmosPreviewUrl,
   getRecordedPageStageSize,
 } from './widgetSnapshotCache';
-import { getBrightHighlighterColor, getHighlighterDodgeColor } from './colorUtils';
+import { getBrightHighlighterColor } from './colorUtils';
 
 interface CachedPagePreview {
   signature: string;
@@ -349,8 +349,12 @@ export async function renderLowResPageCompositePreview(
     ctx.restore();
   }
 
-  // 7. Pen / Highlighter Strokes
-  for (const st of strokes) {
+  // 7. Pen / Highlighter Strokes (highlighters rendered first via multiply so ink stays crisp)
+  const orderedPreviewStrokes = [
+    ...strokes.filter((st) => st.tool === 'highlighter'),
+    ...strokes.filter((st) => st.tool !== 'highlighter'),
+  ];
+  for (const st of orderedPreviewStrokes) {
     if (st.isGhosted || !st.points || st.points.length < 2) continue;
     ctx.save();
     ctx.lineCap = 'round';
@@ -365,19 +369,9 @@ export async function renderLowResPageCompositePreview(
       ctx.stroke();
     };
     if (st.tool === 'highlighter') {
-      const brightHex = getBrightHighlighterColor(st.color);
-      const dodgeHex = getHighlighterDodgeColor(brightHex);
-      ctx.globalCompositeOperation = 'color-dodge';
-      ctx.globalAlpha = 0.88;
-      ctx.strokeStyle = dodgeHex;
-      trace();
-      ctx.globalCompositeOperation = 'color-burn';
-      ctx.globalAlpha = 0.55;
-      ctx.strokeStyle = brightHex;
-      trace();
       ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = st.opacity || 0.52;
-      ctx.strokeStyle = brightHex;
+      ctx.globalAlpha = Math.max(0.78, st.opacity || 0.85);
+      ctx.strokeStyle = getBrightHighlighterColor(st.color);
       trace();
     } else {
       ctx.strokeStyle = st.color;

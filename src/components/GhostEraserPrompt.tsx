@@ -305,7 +305,7 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
                     <path
                       d={strokeToPathD(s)}
                       stroke={s.tool === 'highlighter' ? getBrightHighlighterColor(s.color) : s.color}
-                      strokeOpacity={s.tool === 'highlighter' ? Math.max(0.75, s.opacity || 0.75) : 1}
+                      strokeOpacity={s.tool === 'highlighter' ? 0.85 : 1}
                       strokeWidth={Math.max(2, s.width)}
                       fill="none"
                       strokeLinecap="round"

@@ -1073,13 +1073,17 @@ function drawNoteTeacherVectorOverlays(
     }
   }
 
-  // Ink strokes
-  for (const s of pageStrokes) {
+  // Ink strokes (highlighters drawn first via multiply so pen ink remains crisp on top)
+  const orderedPdfStrokes = [
+    ...pageStrokes.filter((s) => s.tool === 'highlighter'),
+    ...pageStrokes.filter((s) => s.tool !== 'highlighter'),
+  ];
+  for (const s of orderedPdfStrokes) {
     if (s.isGhosted || !s.points || s.points.length === 0) continue;
     const drawHex = s.tool === 'highlighter' ? getBrightHighlighterColor(s.color) : s.color;
     const { r, g, b } = parseHexRgb(drawHex);
     const col = rgb(r, g, b);
-    const op = s.tool === 'highlighter' ? Math.max(0.45, s.opacity || 0.52) : s.tool === 'pencil' ? 0.85 : 1;
+    const op = s.tool === 'highlighter' ? Math.max(0.72, s.opacity || 0.82) : s.tool === 'pencil' ? 0.85 : 1;
     const blend = s.tool === 'highlighter' ? BlendMode.Multiply : BlendMode.Normal;
     const thick = Math.max(0.6, s.width * avgScale);
     if (s.points.length === 1) {

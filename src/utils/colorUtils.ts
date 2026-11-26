@@ -230,35 +230,24 @@ export function hexWithAlphaPercent(hex: string, opacityPercent: number): string
 }
 
 /**
- * Boosts any chosen hex color into a super-bright, high-contrast highlighter tone
- * so every color in the palette/rainbow produces luminous, vivid highlights.
+ * Boosts any chosen hex color into a luminous, vivid fluorescent highlighter tone
+ * so every color in the palette/rainbow highlights brightly on the very first stroke.
  */
 export function getBrightHighlighterColor(hex: string): string {
-  const { h, s, l } = hexToHsl(hex);
+  const { h, s } = hexToHsl(hex);
   if (s < 8) {
-    return hslToHex(205, 45, 84);
+    return hslToHex(200, 92, 74);
   }
-  const isCoolDarkHue = (h >= 210 && h <= 300) || h <= 15 || h >= 340;
-  const targetL = isCoolDarkHue
-    ? Math.max(67, Math.min(75, l))
-    : Math.max(58, Math.min(72, l));
-  const targetS = Math.max(94, Math.min(100, s));
+  let targetL = 62;
+  if (h >= 40 && h <= 85) {
+    targetL = 56; // Luminous neon yellow / chartreuse
+  } else if (h > 85 && h <= 200) {
+    targetL = 62; // Vivid electric green / cyan
+  } else {
+    targetL = 68; // Bright neon blue / purple / magenta / coral-red
+  }
+  const targetS = Math.max(96, Math.min(100, s));
   return hslToHex(h, targetS, targetL);
-}
-
-/**
- * Computes the bounded color-dodge tint for highlighter Pass 1:
- * lifts white, cream, and gray backgrounds toward super-bright white
- * while keeping dark ink & colored elements dark and saturated.
- */
-export function getHighlighterDodgeColor(brightHex: string): string {
-  const { r, g, b } = hexToRgb(brightHex);
-  const toHex = (ch: number) =>
-    Math.round(Math.max(0, Math.min(1, 0.18 + 0.18 * (ch / 255))) * 255)
-      .toString(16)
-      .padStart(2, '0')
-      .toUpperCase();
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
 // Preset quick classroom teaching colors

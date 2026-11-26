@@ -47,7 +47,6 @@ import { recordPageStageSize } from '../utils/widgetSnapshotCache';
 import {
   hexWithAlphaPercent,
   getBrightHighlighterColor,
-  getHighlighterDodgeColor,
 } from '../utils/colorUtils';
 import {
   ensureTouchGeometryTracker,
@@ -1633,7 +1632,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         tool: penType,
         color: finalStrokeColor,
         width: strokeWidth,
-        opacity: penType === 'highlighter' ? 0.52 : 1,
+        opacity: penType === 'highlighter' ? 0.85 : 1,
         points: finalPoints,
       };
 
@@ -3025,8 +3024,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         ctx.restore();
       }
 
-      // 5. Draw Pen Strokes (with 3-pass high-contrast highlighter compositing)
-      for (const strk of pageStrokes) {
+      // 5. Draw Highlighter Strokes first (multiply), then Pen/Pencil Strokes crisp on top
+      const orderedCaptureStrokes = [
+        ...pageStrokes.filter((s) => s.tool === 'highlighter'),
+        ...pageStrokes.filter((s) => s.tool !== 'highlighter'),
+      ];
+      for (const strk of orderedCaptureStrokes) {
         if (strk.isGhosted || !strk.points || strk.points.length < 1) continue;
 
         const traceStrokeGeometry = () => {
@@ -3071,28 +3074,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
         if (strk.tool === 'highlighter') {
           const brightHex = getBrightHighlighterColor(strk.color);
-          const dodgeHex = getHighlighterDodgeColor(brightHex);
-          const passes: Array<{
-            composite: GlobalCompositeOperation;
-            color: string;
-            alpha: number;
-          }> = [
-            { composite: 'color-dodge', color: dodgeHex, alpha: 0.88 },
-            { composite: 'color-burn', color: brightHex, alpha: 0.55 },
-            { composite: 'multiply', color: brightHex, alpha: strk.opacity || 0.52 },
-          ];
-          for (const pass of passes) {
-            ctx.save();
-            ctx.globalCompositeOperation = pass.composite;
-            ctx.globalAlpha = pass.alpha;
-            ctx.strokeStyle = pass.color;
-            ctx.fillStyle = pass.color;
-            ctx.lineWidth = strk.width * activeZoomScale;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            traceStrokeGeometry();
-            ctx.restore();
-          }
+          ctx.save();
+          ctx.globalCompositeOperation = 'multiply';
+          ctx.globalAlpha = Math.max(0.78, strk.opacity || 0.85);
+          ctx.strokeStyle = brightHex;
+          ctx.fillStyle = brightHex;
+          ctx.lineWidth = strk.width * activeZoomScale;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          traceStrokeGeometry();
+          ctx.restore();
         } else {
           ctx.save();
           ctx.strokeStyle = strk.color;
@@ -3861,7 +3852,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   ? getBrightHighlighterColor(currentColor)
                   : currentColor,
               width: strokeWidth,
-              opacity: penType === 'highlighter' ? 0.52 : 1,
+              opacity: penType === 'highlighter' ? 0.85 : 1,
               points: currentPointsRef.current.slice(),
             },
             writingGuides:
@@ -6781,7 +6772,51 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           );
         })()}
 
-        {/* 2. VECTOR DRAWINGS & SHAPES LAYER (Rendered above graphs so annotations and shapes sit on top) */}
+        {/* 1.9 DEDICATED HIGHLIGHTER LAYER (Multiply blends directly over PDF/paper/images while sitting cleanly beneath pen ink & text) */}
+        <svg
+          data-testid="highlighter-svg-layer"
+          shapeRendering="geometricPrecision"
+          style={{ mixBlendMode: 'multiply' }}
+          className="highlighter-svg-layer absolute inset-0 w-full h-full pointer-events-none z-[34] overflow-hidden"
+        >
+          {pageStrokes.map((s) => {
+            if (s.isGhosted || s.tool !== 'highlighter' || !s.points || s.points.length < 1) {
+              return null;
+            }
+            const pathD = pointsToSvgPath(s.points);
+            const brightHex = getBrightHighlighterColor(s.color);
+            return (
+              <path
+                key={s.id}
+                d={pathD}
+                stroke={brightHex}
+                strokeWidth={s.width}
+                strokeOpacity={Math.max(0.78, s.opacity || 0.85)}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            );
+          })}
+
+          {isAudienceViewer &&
+            externalLiveOverlay?.stroke &&
+            externalLiveOverlay.stroke.pageId === pageId &&
+            externalLiveOverlay.stroke.tool === 'highlighter' &&
+            externalLiveOverlay.stroke.points.length >= 1 && (
+              <path
+                d={pointsToSvgPath(externalLiveOverlay.stroke.points)}
+                stroke={getBrightHighlighterColor(externalLiveOverlay.stroke.color)}
+                strokeWidth={externalLiveOverlay.stroke.width}
+                strokeOpacity={0.85}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+        </svg>
+
+        {/* 2. VECTOR DRAWINGS & SHAPES LAYER (Rendered above highlights & graphs so ink sits crisp on top) */}
         <svg
           shapeRendering="geometricPrecision"
           className="absolute inset-0 w-full h-full pointer-events-none z-35 overflow-hidden"
@@ -6789,50 +6824,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           {/* Page Geometric Shapes (non-grid) */}
           {pageShapes.map(renderShapeSvg)}
 
-          {/* Page Freehand Strokes */}
+          {/* Page Freehand Pen / Pencil / Ghosted Strokes */}
           {pageStrokes.map((s) => {
             if (!s.points || s.points.length < 1) return null;
+            if (!s.isGhosted && s.tool === 'highlighter') return null;
             const pathD = pointsToSvgPath(s.points);
-
-            if (!s.isGhosted && s.tool === 'highlighter') {
-              const brightHex = getBrightHighlighterColor(s.color);
-              const dodgeHex = getHighlighterDodgeColor(brightHex);
-              return (
-                <React.Fragment key={s.id}>
-                  <path
-                    d={pathD}
-                    stroke={dodgeHex}
-                    strokeWidth={s.width}
-                    strokeOpacity={0.88}
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    style={{ mixBlendMode: 'color-dodge' }}
-                  />
-                  <path
-                    d={pathD}
-                    stroke={brightHex}
-                    strokeWidth={s.width}
-                    strokeOpacity={0.55}
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    style={{ mixBlendMode: 'color-burn' }}
-                  />
-                  <path
-                    d={pathD}
-                    stroke={brightHex}
-                    strokeWidth={s.width}
-                    strokeOpacity={s.opacity || 0.52}
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    style={{ mixBlendMode: 'multiply' }}
-                  />
-                </React.Fragment>
-              );
-            }
-
             const strokeColor = s.isGhosted ? '#DC2626' : s.color;
             const strokeDash = s.isGhosted ? '4 4' : undefined;
             const opacity = s.isGhosted
@@ -6862,48 +6858,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               {externalLiveOverlay.stroke &&
                 externalLiveOverlay.stroke.pageId === pageId &&
                 externalLiveOverlay.stroke.points.length >= 1 &&
-                (externalLiveOverlay.stroke.tool === 'highlighter' ? (
-                  (() => {
-                    const liveStrk = externalLiveOverlay.stroke!;
-                    const livePathD = pointsToSvgPath(liveStrk.points);
-                    const brightHex = getBrightHighlighterColor(liveStrk.color);
-                    const dodgeHex = getHighlighterDodgeColor(brightHex);
-                    return (
-                      <>
-                        <path
-                          d={livePathD}
-                          stroke={dodgeHex}
-                          strokeWidth={liveStrk.width}
-                          strokeOpacity={0.88}
-                          fill="none"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          style={{ mixBlendMode: 'color-dodge' }}
-                        />
-                        <path
-                          d={livePathD}
-                          stroke={brightHex}
-                          strokeWidth={liveStrk.width}
-                          strokeOpacity={0.55}
-                          fill="none"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          style={{ mixBlendMode: 'color-burn' }}
-                        />
-                        <path
-                          d={livePathD}
-                          stroke={brightHex}
-                          strokeWidth={liveStrk.width}
-                          strokeOpacity={0.52}
-                          fill="none"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          style={{ mixBlendMode: 'multiply' }}
-                        />
-                      </>
-                    );
-                  })()
-                ) : (
+                externalLiveOverlay.stroke.tool !== 'highlighter' && (
                   <path
                     d={pointsToSvgPath(externalLiveOverlay.stroke.points)}
                     stroke={externalLiveOverlay.stroke.color}
@@ -6913,7 +6868,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
-                ))}
+                )}
 
               {externalLiveOverlay.shape &&
                 externalLiveOverlay.shape.pageId === pageId &&
@@ -7824,7 +7779,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             ref={liveCanvasRef}
             style={{
               touchAction: 'none',
-              opacity: penType === 'highlighter' ? 0.56 : penType === 'pencil' ? 0.85 : 1,
+              opacity: penType === 'highlighter' ? 0.85 : penType === 'pencil' ? 0.85 : 1,
               mixBlendMode: penType === 'highlighter' ? 'multiply' : 'normal',
             }}
             className="live-ink-canvas absolute inset-0 w-full h-full pointer-events-none z-[36]"
