@@ -165,7 +165,7 @@ export default function App() {
   const [penProfiles, setPenProfiles] = useState<Record<PenType, { width: number; color: string }>>({
     pen: { width: 3, color: '#0F172A' },
     pencil: { width: 2, color: '#475569' },
-    highlighter: { width: 24, color: '#FEF08A' },
+    highlighter: { width: 24, color: '#FFF433' },
     eraser: { width: 24, color: '#EF4444' },
   });
 
@@ -455,6 +455,7 @@ export default function App() {
                 ? parsed.mode
                 : 'bottom',
             ignoreEqualsTopBottom: Boolean(parsed.ignoreEqualsTopBottom),
+            extendLines: Boolean(parsed.extendLines),
             thickness:
               typeof parsed.thickness === 'number' && parsed.thickness >= 1 && parsed.thickness <= 8
                 ? parsed.thickness
@@ -473,11 +474,31 @@ export default function App() {
       quickPaused: false,
       mode: 'bottom',
       ignoreEqualsTopBottom: false,
+      extendLines: false,
       thickness: 1.5,
       opacity: 0.45,
       color: '#5B7FA6',
     };
   });
+
+  // Draw Mode Auto-Straighten Lines toggle
+  const [autoStraightenLines, setAutoStraightenLines] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('noteteacher_auto_straighten_lines') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleAutoStraightenLines = useCallback(() => {
+    setAutoStraightenLines((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('noteteacher_auto_straighten_lines', String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
 
   const handleUpdateWritingGuideConfig = useCallback((updated: Partial<WritingGuideConfig>) => {
     setWritingGuideConfig((prev) => {
@@ -2411,18 +2432,30 @@ export default function App() {
   const handleCommitDrawingStroke = (
     stroke: CanvasStroke,
     guideShapesToAdd?: GeometricShape[],
-    shapeIdsToDelete?: string[]
+    shapeIdsToDelete?: string[],
+    shapePatches?: Array<{ id: string; patch: Partial<GeometricShape> }>
   ) => {
     saveSnapshot();
     setStrokes((prev) => [...prev, stroke]);
     if (
       (guideShapesToAdd && guideShapesToAdd.length > 0) ||
-      (shapeIdsToDelete && shapeIdsToDelete.length > 0)
+      (shapeIdsToDelete && shapeIdsToDelete.length > 0) ||
+      (shapePatches && shapePatches.length > 0)
     ) {
       setShapes((prev) => {
         const delSet =
           shapeIdsToDelete && shapeIdsToDelete.length > 0 ? new Set(shapeIdsToDelete) : null;
+        const patchMap =
+          shapePatches && shapePatches.length > 0
+            ? new Map(shapePatches.map((p) => [p.id, p.patch]))
+            : null;
         let next = delSet ? prev.filter((sh) => !delSet.has(sh.id)) : prev;
+        if (patchMap) {
+          next = next.map((sh) => {
+            const patch = patchMap.get(sh.id);
+            return patch ? { ...sh, ...patch } : sh;
+          });
+        }
         if (guideShapesToAdd && guideShapesToAdd.length > 0) {
           next = [...next, ...guideShapesToAdd];
         }
@@ -2886,6 +2919,8 @@ export default function App() {
             sh.guideBandTop !== undefined ? sh.guideBandTop + dy : undefined,
           guideBandBottom:
             sh.guideBandBottom !== undefined ? sh.guideBandBottom + dy : undefined,
+          guideExtTop:
+            sh.guideExtTop !== undefined ? sh.guideExtTop + dy : undefined,
           points: sh.points
             ? sh.points.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy }))
             : undefined,
@@ -3218,8 +3253,8 @@ export default function App() {
         setShapes((prev) =>
           prev.map((sh) => {
             if (sh.id !== shapeId) return sh;
-            const curCols = sh.gridCols || Math.max(2, Math.round(Math.abs(sh.width) / 28));
-            const curRows = sh.gridRows || Math.max(2, Math.round(Math.abs(sh.height) / 28));
+            const curCols = sh.gridCols || Math.max(1, Math.round(Math.abs(sh.width) / 28));
+            const curRows = sh.gridRows || Math.max(1, Math.round(Math.abs(sh.height) / 28));
             return {
               ...sh,
               gridCols: field === 'cols' ? clamped : curCols,
@@ -3237,9 +3272,9 @@ export default function App() {
     const targetShape = shapesRef.current.find((sh) => sh.id === shapeId);
     if (!targetShape) return;
     const cols =
-      targetShape.gridCols || Math.max(2, Math.round(Math.abs(targetShape.width) / 28));
+      targetShape.gridCols || Math.max(1, Math.round(Math.abs(targetShape.width) / 28));
     const rows =
-      targetShape.gridRows || Math.max(2, Math.round(Math.abs(targetShape.height) / 28));
+      targetShape.gridRows || Math.max(1, Math.round(Math.abs(targetShape.height) / 28));
     setEditingGridDims({
       shapeId,
       field,
@@ -5047,6 +5082,8 @@ export default function App() {
         onSetCurrentColor={handleSetCurrentColor}
         writingGuideConfig={writingGuideConfig}
         onUpdateWritingGuideConfig={handleUpdateWritingGuideConfig}
+        autoStraightenLines={autoStraightenLines}
+        onToggleAutoStraightenLines={handleToggleAutoStraightenLines}
         documentColors={documentColors}
         paletteColors={paletteColors}
         onUpdatePaletteColors={handleUpdatePaletteColors}
@@ -5490,6 +5527,7 @@ export default function App() {
                 calculators={calculatorsByPage.get(page.id) ?? EMPTY_CALCULATORS}
                 images={imagesByPage.get(page.id) ?? EMPTY_IMAGES}
                 writingGuideConfig={writingGuideConfig}
+                autoStraightenLines={autoStraightenLines}
                 onToggleWritingGuidesQuick={handleToggleWritingGuidesQuick}
                 onCommitDrawingStroke={handleCommitDrawingStroke}
                 onAddStroke={handleAddStroke}

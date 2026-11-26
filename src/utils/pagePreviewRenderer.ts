@@ -14,6 +14,7 @@ import {
   getCachedDesmosPreviewUrl,
   getRecordedPageStageSize,
 } from './widgetSnapshotCache';
+import { getBrightHighlighterColor, getHighlighterDodgeColor } from './colorUtils';
 
 interface CachedPagePreview {
   signature: string;
@@ -354,15 +355,35 @@ export async function renderLowResPageCompositePreview(
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = st.color;
     ctx.lineWidth = Math.max(0.8, st.width * avgScale);
-    ctx.globalAlpha = st.tool === 'highlighter' ? st.opacity || 0.35 : 0.95;
-    ctx.beginPath();
-    ctx.moveTo(st.points[0].x * scaleX, st.points[0].y * scaleY);
-    for (let i = 1; i < st.points.length; i++) {
-      ctx.lineTo(st.points[i].x * scaleX, st.points[i].y * scaleY);
+    const trace = () => {
+      ctx.beginPath();
+      ctx.moveTo(st.points[0].x * scaleX, st.points[0].y * scaleY);
+      for (let i = 1; i < st.points.length; i++) {
+        ctx.lineTo(st.points[i].x * scaleX, st.points[i].y * scaleY);
+      }
+      ctx.stroke();
+    };
+    if (st.tool === 'highlighter') {
+      const brightHex = getBrightHighlighterColor(st.color);
+      const dodgeHex = getHighlighterDodgeColor(brightHex);
+      ctx.globalCompositeOperation = 'color-dodge';
+      ctx.globalAlpha = 0.88;
+      ctx.strokeStyle = dodgeHex;
+      trace();
+      ctx.globalCompositeOperation = 'color-burn';
+      ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = brightHex;
+      trace();
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = st.opacity || 0.52;
+      ctx.strokeStyle = brightHex;
+      trace();
+    } else {
+      ctx.strokeStyle = st.color;
+      ctx.globalAlpha = 0.95;
+      trace();
     }
-    ctx.stroke();
     ctx.restore();
   }
 

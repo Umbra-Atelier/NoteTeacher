@@ -75,6 +75,7 @@ export interface WritingGuideConfig {
   quickPaused: boolean;
   mode: WritingGuideMode;
   ignoreEqualsTopBottom: boolean;
+  extendLines?: boolean;
   thickness: number;
   opacity: number;
   color: string;
@@ -126,9 +127,12 @@ export interface GeometricShape {
   opacity?: number;
   isWritingGuide?: boolean;
   guideGroupId?: string;
-  guideRole?: 'bottom' | 'top';
+  guideRole?: 'bottom' | 'top' | 'extended';
   guideBandTop?: number;
   guideBandBottom?: number;
+  guideSpacing?: number;
+  guideExtTop?: number;
+  guideExtended?: boolean;
 }
 
 export interface LiveStrokePreview {

@@ -441,8 +441,8 @@ export function decomposeGeometricShapeToPaths(
     const gh = Math.max(20, Math.abs(sh.height));
     const gx = sh.x;
     const gy = sh.y;
-    const rows = sh.gridRows || Math.max(2, Math.round(gh / 28));
-    const cols = sh.gridCols || Math.max(2, Math.round(gw / 28));
+    const rows = sh.gridRows || Math.max(1, Math.round(gh / 28));
+    const cols = sh.gridCols || Math.max(1, Math.round(gw / 28));
     const paths: Array<{ points: StrokePoint[]; isClosedLoop: boolean }> = [
       {
         isClosedLoop: true,
@@ -617,6 +617,9 @@ export function circleErasePage(
           guideRole: sh.guideRole,
           guideBandTop: sh.guideBandTop,
           guideBandBottom: sh.guideBandBottom,
+          guideSpacing: sh.guideSpacing,
+          guideExtTop: sh.guideExtTop,
+          guideExtended: sh.guideExtended,
           isGhosted: run.inside,
         });
       }

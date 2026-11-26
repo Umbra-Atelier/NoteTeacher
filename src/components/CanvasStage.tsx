@@ -44,7 +44,11 @@ import { PresenterOverlay } from './PresenterOverlay';
 import { RotationJoystickControl } from './RotationJoystickControl';
 import { sanitizeClonedDocumentForHtml2Canvas } from '../utils/domSnapshot';
 import { recordPageStageSize } from '../utils/widgetSnapshotCache';
-import { hexWithAlphaPercent } from '../utils/colorUtils';
+import {
+  hexWithAlphaPercent,
+  getBrightHighlighterColor,
+  getHighlighterDodgeColor,
+} from '../utils/colorUtils';
 import {
   ensureTouchGeometryTracker,
   recordTouchGeometry,
@@ -206,11 +210,13 @@ interface CanvasStageProps {
   onChangeGridDimsDraft?: (shapeId: string, field: 'cols' | 'rows', draft: string) => void;
   onStopEditGridDims?: () => void;
   writingGuideConfig?: WritingGuideConfig;
+  autoStraightenLines?: boolean;
   onToggleWritingGuidesQuick?: () => void;
   onCommitDrawingStroke?: (
     stroke: CanvasStroke,
     guideShapesToAdd?: GeometricShape[],
-    shapeIdsToDelete?: string[]
+    shapeIdsToDelete?: string[],
+    shapePatches?: Array<{ id: string; patch: Partial<GeometricShape> }>
   ) => void;
   onAddStroke: (stroke: CanvasStroke) => void;
   onAddShape: (shape: GeometricShape) => void;
@@ -375,6 +381,113 @@ function isStraightLineOrDotStroke(points?: StrokePoint[]): boolean {
   return maxDev <= Math.max(5, pathLen * 0.065);
 }
 
+// Auto-straighten strokes that are roughly linear while keeping freehand curves smooth
+function maybeStraightenStrokePoints(points: StrokePoint[]): StrokePoint[] {
+  if (!points || points.length < 2) return points;
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  const chord = Math.hypot(last.x - first.x, last.y - first.y);
+  if (chord < 18) return points;
+
+  let pathLen = 0;
+  for (let i = 1; i < points.length; i++) {
+    pathLen += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  }
+  if (pathLen < 18 || chord / pathLen < 0.94) return points;
+
+  // Compute centroid & covariance principal axis (total least squares line fit)
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < points.length; i++) {
+    cx += points[i].x;
+    cy += points[i].y;
+  }
+  cx /= points.length;
+  cy /= points.length;
+
+  let cxx = 0;
+  let cyy = 0;
+  let cxy = 0;
+  for (let i = 0; i < points.length; i++) {
+    const dx = points[i].x - cx;
+    const dy = points[i].y - cy;
+    cxx += dx * dx;
+    cyy += dy * dy;
+    cxy += dx * dy;
+  }
+
+  const theta = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
+  let ux = Math.cos(theta);
+  let uy = Math.sin(theta);
+
+  // Align unit axis with drawing direction
+  if ((last.x - first.x) * ux + (last.y - first.y) * uy < 0) {
+    ux = -ux;
+    uy = -uy;
+  }
+
+  let maxDev = 0;
+  let sumDev = 0;
+  let prevProj = (first.x - cx) * ux + (first.y - cy) * uy;
+  let maxBackward = 0;
+
+  for (let i = 0; i < points.length; i++) {
+    const dx = points[i].x - cx;
+    const dy = points[i].y - cy;
+    const proj = dx * ux + dy * uy;
+    const perp = Math.abs(dx * -uy + dy * ux);
+    if (perp > maxDev) maxDev = perp;
+    sumDev += perp;
+    if (i > 0 && proj < prevProj) {
+      maxBackward = Math.max(maxBackward, prevProj - proj);
+    }
+    if (proj > prevProj) prevProj = proj;
+  }
+
+  const meanDev = sumDev / points.length;
+  const maxAllowedDev = Math.max(7, Math.min(20, chord * 0.06));
+  const maxAllowedMean = Math.max(3.2, chord * 0.028);
+
+  if (maxDev > maxAllowedDev || meanDev > maxAllowedMean || maxBackward > Math.max(5, chord * 0.08)) {
+    return points;
+  }
+
+  // Gentle axis snap when within 1.8 degrees of horizontal or vertical
+  const axisThreshold = Math.sin((1.8 * Math.PI) / 180);
+  if (Math.abs(uy) <= axisThreshold) {
+    ux = ux >= 0 ? 1 : -1;
+    uy = 0;
+  } else if (Math.abs(ux) <= axisThreshold) {
+    ux = 0;
+    uy = uy >= 0 ? 1 : -1;
+  }
+
+  const startProj = (first.x - cx) * ux + (first.y - cy) * uy;
+  const endProj = (last.x - cx) * ux + (last.y - cy) * uy;
+  const ax = cx + startProj * ux;
+  const ay = cy + startProj * uy;
+  const bx = cx + endProj * ux;
+  const by = cy + endProj * uy;
+  const lineLen = Math.hypot(bx - ax, by - ay);
+  if (lineLen < 4) return points;
+
+  // Resample collinear points so erasers and magic grab hit-test cleanly along the full line
+  const steps = Math.max(4, Math.min(80, Math.round(lineLen / 8)));
+  const avgPressure =
+    points.reduce((acc, p) => acc + (p.pressure ?? 0.5), 0) / points.length;
+  const result: StrokePoint[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    result.push({
+      x: ax + (bx - ax) * t,
+      y: ay + (by - ay) * t,
+      pressure: avgPressure,
+    });
+  }
+  return result;
+}
+
 const PDF_TILE_COLS = 3;
 const PDF_TILE_ROWS = 4;
 
@@ -489,6 +602,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   onChangeGridDimsDraft,
   onStopEditGridDims,
   writingGuideConfig,
+  autoStraightenLines = false,
   onToggleWritingGuidesQuick,
   onCommitDrawingStroke,
   onAddStroke,
@@ -1162,6 +1276,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   } | null>(null);
   const writingGuideConfigRef = useRef(writingGuideConfig);
   writingGuideConfigRef.current = writingGuideConfig;
+  const autoStraightenLinesRef = useRef(autoStraightenLines);
+  autoStraightenLinesRef.current = autoStraightenLines;
+  const penTypeRef = useRef(penType);
+  penTypeRef.current = penType;
   const pageShapesRef = useRef(pageShapes);
   pageShapesRef.current = pageShapes;
   const onCommitDrawingStrokeRef = useRef(onCommitDrawingStroke);
@@ -1170,11 +1288,17 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   onAddStrokeRef.current = onAddStroke;
 
   const activeGuideTrackRef = useRef<{
+    kind: 'new' | 'extend';
     minX: number;
     maxX: number;
     minY: number;
     maxY: number;
     showTop: boolean;
+    targetGuideId?: string;
+    anchorY?: number;
+    spacing?: number;
+    extTop?: number;
+    groupId?: string;
   } | null>(null);
 
   const lastEqualCandidateRef = useRef<{
@@ -1344,9 +1468,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       const startIdx = renderedPointCountRef.current;
       if (startIdx >= pts.length) return;
 
+      const drawColor =
+        penTypeRef.current === 'highlighter' ? getBrightHighlighterColor(color) : color;
       ctx.save();
-      ctx.strokeStyle = color;
-      ctx.fillStyle = color;
+      ctx.strokeStyle = drawColor;
+      ctx.fillStyle = drawColor;
       ctx.lineWidth = width;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -1487,6 +1613,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     }
 
     if (pts.length >= 1) {
+      const finalPoints =
+        autoStraightenLinesRef.current && penType !== 'eraser'
+          ? maybeStraightenStrokePoints(pts)
+          : pts;
+      const finalStrokeColor =
+        penType === 'highlighter' ? getBrightHighlighterColor(currentColor) : currentColor;
+
       const strokeId = `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       pendingLiveCanvasClearRef.current = true;
       if (!isActivePage && onActivatePage) {
@@ -1498,10 +1631,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         id: strokeId,
         pageId,
         tool: penType,
-        color: currentColor,
+        color: finalStrokeColor,
         width: strokeWidth,
-        opacity: penType === 'highlighter' ? 0.35 : 1,
-        points: pts,
+        opacity: penType === 'highlighter' ? 0.52 : 1,
+        points: finalPoints,
       };
 
       const guideTrack = activeGuideTrackRef.current;
@@ -1514,21 +1647,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
       let guideShapesToAdd: GeometricShape[] | undefined;
       let shapeIdsToDelete: string[] | undefined;
+      let shapePatches: Array<{ id: string; patch: Partial<GeometricShape> }> | undefined;
 
       // Compute full stroke bounds
       let sMinX = Infinity;
       let sMaxX = -Infinity;
       let sMinY = Infinity;
       let sMaxY = -Infinity;
-      for (let i = 0; i < pts.length; i++) {
-        const p = pts[i];
+      for (let i = 0; i < finalPoints.length; i++) {
+        const p = finalPoints[i];
         if (p.x < sMinX) sMinX = p.x;
         if (p.x > sMaxX) sMaxX = p.x;
         if (p.y < sMinY) sMinY = p.y;
         if (p.y > sMaxY) sMaxY = p.y;
       }
 
-      if (guidesCurrentlyActive && pts.length > 0 && Number.isFinite(sMinY)) {
+      if (guidesCurrentlyActive && finalPoints.length > 0 && Number.isFinite(sMinY)) {
         const cand = lastEqualCandidateRef.current;
         const strokeBounds = { minX: sMinX, maxX: sMaxX, minY: sMinY, maxY: sMaxY };
 
@@ -1553,72 +1687,149 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
               100,
               interactionLayerRef.current?.clientWidth || stageDims.width || 612
             );
-            const letterH = Math.max(0, sMaxY - sMinY);
-            const topPad = Math.max(14, Math.min(36, letterH * 0.35));
-            const bottomPad = Math.max(14, Math.min(34, letterH * 0.35));
-            const bandTop = sMinY - topPad;
-            const bandBottom = sMaxY + bottomPad;
-            const guideGroupId = `guidegrp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-            const bottomId = `guide-b-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-
-            const created: GeometricShape[] = [
-              {
-                id: bottomId,
-                type: 'line',
-                pageId,
-                x: 0,
-                y: sMaxY,
-                width: pageW,
-                height: 0,
-                strokeColor: gCfg.color || '#5B7FA6',
-                strokeWidth: gCfg.thickness || 1.5,
-                strokeStyle: 'solid',
-                opacity: gCfg.opacity ?? 0.45,
-                isWritingGuide: true,
-                guideGroupId,
-                guideRole: 'bottom',
-                guideBandTop: bandTop,
-                guideBandBottom: bandBottom,
-              },
-            ];
-
-            if (guideTrack.showTop) {
-              const topId = `guide-t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-              created.push({
-                id: topId,
-                type: 'line',
-                pageId,
-                x: 0,
-                y: sMinY,
-                width: pageW,
-                height: 0,
-                strokeColor: gCfg.color || '#5B7FA6',
-                strokeWidth: gCfg.thickness || 1.5,
-                strokeStyle: 'solid',
-                opacity: gCfg.opacity ?? 0.45,
-                isWritingGuide: true,
-                guideGroupId,
-                guideRole: 'top',
-                guideBandTop: bandTop,
-                guideBandBottom: bandBottom,
-              });
-            }
-
-            guideShapesToAdd = created;
 
             if (
-              gCfg.mode === 'ignore_equals' &&
-              isStrokeRoughlyHorizontal(sMinX, sMaxX, sMinY, sMaxY)
+              guideTrack.kind === 'extend' &&
+              gCfg.extendLines &&
+              guideTrack.targetGuideId &&
+              typeof guideTrack.anchorY === 'number' &&
+              typeof guideTrack.spacing === 'number'
             ) {
-              lastEqualCandidateRef.current = {
-                pageId,
-                guideGroupId,
-                shapeIds: created.map((c) => c.id),
-                minX: sMinX,
-                maxX: sMaxX,
-                minY: sMinY,
-                maxY: sMaxY,
-              };
+              // Consume the current extension space so further letters inside it act normally,
+              // and extend a new spaced guide below it.
+              const prevExtTop =
+                typeof guideTrack.extTop === 'number'
+                  ? guideTrack.extTop
+                  : guideTrack.anchorY - guideTrack.spacing;
+              const nextExtY = guideTrack.anchorY + guideTrack.spacing;
+              const nextExtId = `guide-e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+              shapePatches = [
+                {
+                  id: guideTrack.targetGuideId,
+                  patch: {
+                    guideExtended: true,
+                    guideBandTop: prevExtTop - 4,
+                    guideBandBottom: guideTrack.anchorY + 2,
+                  },
+                },
+              ];
+
+              guideShapesToAdd = [
+                {
+                  id: nextExtId,
+                  type: 'line',
+                  pageId,
+                  x: 0,
+                  y: nextExtY,
+                  width: pageW,
+                  height: 0,
+                  strokeColor: gCfg.color || '#5B7FA6',
+                  strokeWidth: gCfg.thickness || 1.5,
+                  strokeStyle: 'solid',
+                  opacity: gCfg.opacity ?? 0.45,
+                  isWritingGuide: true,
+                  guideGroupId: guideTrack.groupId,
+                  guideRole: 'extended',
+                  guideExtTop: guideTrack.anchorY,
+                  guideSpacing: guideTrack.spacing,
+                  guideExtended: false,
+                },
+              ];
+            } else if (guideTrack.kind === 'new') {
+              const letterH = Math.max(0, sMaxY - sMinY);
+              const topPad = Math.max(14, Math.min(36, letterH * 0.35));
+              const bottomPad = gCfg.extendLines
+                ? 2
+                : Math.max(14, Math.min(34, letterH * 0.35));
+              const bandTop = sMinY - topPad;
+              const bandBottom = sMaxY + bottomPad;
+              const guideGroupId = `guidegrp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              const bottomId = `guide-b-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+              const created: GeometricShape[] = [
+                {
+                  id: bottomId,
+                  type: 'line',
+                  pageId,
+                  x: 0,
+                  y: sMaxY,
+                  width: pageW,
+                  height: 0,
+                  strokeColor: gCfg.color || '#5B7FA6',
+                  strokeWidth: gCfg.thickness || 1.5,
+                  strokeStyle: 'solid',
+                  opacity: gCfg.opacity ?? 0.45,
+                  isWritingGuide: true,
+                  guideGroupId,
+                  guideRole: 'bottom',
+                  guideBandTop: bandTop,
+                  guideBandBottom: bandBottom,
+                },
+              ];
+
+              if (guideTrack.showTop) {
+                const topId = `guide-t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                created.push({
+                  id: topId,
+                  type: 'line',
+                  pageId,
+                  x: 0,
+                  y: sMinY,
+                  width: pageW,
+                  height: 0,
+                  strokeColor: gCfg.color || '#5B7FA6',
+                  strokeWidth: gCfg.thickness || 1.5,
+                  strokeStyle: 'solid',
+                  opacity: gCfg.opacity ?? 0.45,
+                  isWritingGuide: true,
+                  guideGroupId,
+                  guideRole: 'top',
+                  guideBandTop: bandTop,
+                  guideBandBottom: bandBottom,
+                });
+              }
+
+              if (gCfg.extendLines) {
+                const spacing = Math.max(24, letterH);
+                const extId = `guide-e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                created.push({
+                  id: extId,
+                  type: 'line',
+                  pageId,
+                  x: 0,
+                  y: sMaxY + spacing,
+                  width: pageW,
+                  height: 0,
+                  strokeColor: gCfg.color || '#5B7FA6',
+                  strokeWidth: gCfg.thickness || 1.5,
+                  strokeStyle: 'solid',
+                  opacity: gCfg.opacity ?? 0.45,
+                  isWritingGuide: true,
+                  guideGroupId,
+                  guideRole: 'extended',
+                  guideExtTop: sMaxY,
+                  guideSpacing: spacing,
+                  guideExtended: false,
+                });
+              }
+
+              guideShapesToAdd = created;
+
+              if (
+                gCfg.mode === 'ignore_equals' &&
+                isStrokeRoughlyHorizontal(sMinX, sMaxX, sMinY, sMaxY)
+              ) {
+                lastEqualCandidateRef.current = {
+                  pageId,
+                  guideGroupId,
+                  shapeIds: created.map((c) => c.id),
+                  minX: sMinX,
+                  maxX: sMaxX,
+                  minY: sMinY,
+                  maxY: sMaxY,
+                };
+              }
             }
           }
         }
@@ -1627,7 +1838,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
 
       if (onCommitDrawingStrokeRef.current) {
-        onCommitDrawingStrokeRef.current(strokeObj, guideShapesToAdd, shapeIdsToDelete);
+        onCommitDrawingStrokeRef.current(
+          strokeObj,
+          guideShapesToAdd,
+          shapeIdsToDelete,
+          shapePatches
+        );
       } else {
         onAddStrokeRef.current(strokeObj);
       }
@@ -2809,52 +3025,87 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         ctx.restore();
       }
 
-      // 5. Draw Pen Strokes
+      // 5. Draw Pen Strokes (with 3-pass high-contrast highlighter compositing)
       for (const strk of pageStrokes) {
         if (strk.isGhosted || !strk.points || strk.points.length < 1) continue;
-        ctx.save();
-        ctx.strokeStyle = strk.color;
-        ctx.fillStyle = strk.color;
-        ctx.lineWidth = strk.width * activeZoomScale;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        if (strk.tool === 'highlighter') {
-          ctx.globalAlpha = 0.45;
-        }
-        if (strk.points.length === 1) {
-          const p0 = strk.points[0];
-          ctx.beginPath();
-          ctx.arc(
-            (p0.x - stageCropLeft) * activeZoomScale,
-            (p0.y - stageCropTop) * activeZoomScale,
-            Math.max(0.5, (strk.width * activeZoomScale) / 2),
-            0,
-            Math.PI * 2
-          );
-          ctx.fill();
-          ctx.restore();
-          continue;
-        }
 
-        ctx.beginPath();
-        const p0 = strk.points[0];
-        ctx.moveTo((p0.x - stageCropLeft) * activeZoomScale, (p0.y - stageCropTop) * activeZoomScale);
-        for (let i = 1; i < strk.points.length; i++) {
-          const pPrev = strk.points[i - 1];
-          const pCur = strk.points[i];
-          const midX = ((pPrev.x + pCur.x) / 2 - stageCropLeft) * activeZoomScale;
-          const midY = ((pPrev.y + pCur.y) / 2 - stageCropTop) * activeZoomScale;
-          ctx.quadraticCurveTo(
-            (pPrev.x - stageCropLeft) * activeZoomScale,
-            (pPrev.y - stageCropTop) * activeZoomScale,
-            midX,
-            midY
+        const traceStrokeGeometry = () => {
+          if (strk.points.length === 1) {
+            const p0 = strk.points[0];
+            ctx.beginPath();
+            ctx.arc(
+              (p0.x - stageCropLeft) * activeZoomScale,
+              (p0.y - stageCropTop) * activeZoomScale,
+              Math.max(0.5, (strk.width * activeZoomScale) / 2),
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+            return;
+          }
+          ctx.beginPath();
+          const p0 = strk.points[0];
+          ctx.moveTo(
+            (p0.x - stageCropLeft) * activeZoomScale,
+            (p0.y - stageCropTop) * activeZoomScale
           );
+          for (let i = 1; i < strk.points.length; i++) {
+            const pPrev = strk.points[i - 1];
+            const pCur = strk.points[i];
+            const midX = ((pPrev.x + pCur.x) / 2 - stageCropLeft) * activeZoomScale;
+            const midY = ((pPrev.y + pCur.y) / 2 - stageCropTop) * activeZoomScale;
+            ctx.quadraticCurveTo(
+              (pPrev.x - stageCropLeft) * activeZoomScale,
+              (pPrev.y - stageCropTop) * activeZoomScale,
+              midX,
+              midY
+            );
+          }
+          const pLast = strk.points[strk.points.length - 1];
+          ctx.lineTo(
+            (pLast.x - stageCropLeft) * activeZoomScale,
+            (pLast.y - stageCropTop) * activeZoomScale
+          );
+          ctx.stroke();
+        };
+
+        if (strk.tool === 'highlighter') {
+          const brightHex = getBrightHighlighterColor(strk.color);
+          const dodgeHex = getHighlighterDodgeColor(brightHex);
+          const passes: Array<{
+            composite: GlobalCompositeOperation;
+            color: string;
+            alpha: number;
+          }> = [
+            { composite: 'color-dodge', color: dodgeHex, alpha: 0.88 },
+            { composite: 'color-burn', color: brightHex, alpha: 0.55 },
+            { composite: 'multiply', color: brightHex, alpha: strk.opacity || 0.52 },
+          ];
+          for (const pass of passes) {
+            ctx.save();
+            ctx.globalCompositeOperation = pass.composite;
+            ctx.globalAlpha = pass.alpha;
+            ctx.strokeStyle = pass.color;
+            ctx.fillStyle = pass.color;
+            ctx.lineWidth = strk.width * activeZoomScale;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            traceStrokeGeometry();
+            ctx.restore();
+          }
+        } else {
+          ctx.save();
+          ctx.strokeStyle = strk.color;
+          ctx.fillStyle = strk.color;
+          ctx.lineWidth = strk.width * activeZoomScale;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          if (strk.tool === 'pencil') {
+            ctx.globalAlpha = 0.85;
+          }
+          traceStrokeGeometry();
+          ctx.restore();
         }
-        const pLast = strk.points[strk.points.length - 1];
-        ctx.lineTo((pLast.x - stageCropLeft) * activeZoomScale, (pLast.y - stageCropTop) * activeZoomScale);
-        ctx.stroke();
-        ctx.restore();
       }
 
       dataUrl = offscreen.toDataURL('image/png');
@@ -3471,47 +3722,104 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       }
       lastCommittedBridgeRef.current = null;
 
-      // Initialize dynamic Writing Guidelines tracking if active and stroke starts outside existing row bands
+      // Initialize dynamic Writing Guidelines tracking (regular row vs. active extension zone vs. new row)
       const gCfg = writingGuideConfigRef.current;
       if (gCfg?.enabled && !gCfg.quickPaused && penType !== 'eraser' && initialPts.length > 0) {
         const startY = initialPts[0].y;
         const inExistingBand = pageShapesRef.current.some((sh) => {
           if (!sh.isWritingGuide || sh.isGhosted) return false;
+          if (sh.guideRole === 'extended' && !sh.guideExtended) {
+            // When Extend Line is on, the unconsumed extension zone handles extensions below;
+            // when Extend Line is off, treat it as a normal row so it stays clean.
+            if (!gCfg.extendLines && typeof sh.guideExtTop === 'number') {
+              return startY >= sh.guideExtTop - 4 && startY <= sh.y + 4;
+            }
+            return false;
+          }
           if (typeof sh.guideBandTop === 'number' && typeof sh.guideBandBottom === 'number') {
             return startY >= sh.guideBandTop && startY <= sh.guideBandBottom;
           }
-          return Math.abs(startY - sh.y) <= 20;
+          return Math.abs(startY - sh.y) <= 14;
         });
 
-        if (!inExistingBand) {
-          let gMinX = Infinity;
-          let gMaxX = -Infinity;
-          let gMinY = Infinity;
-          let gMaxY = -Infinity;
-          for (let i = 0; i < initialPts.length; i++) {
-            const p = initialPts[i];
-            if (p.x < gMinX) gMinX = p.x;
-            if (p.x > gMaxX) gMaxX = p.x;
-            if (p.y < gMinY) gMinY = p.y;
-            if (p.y > gMaxY) gMaxY = p.y;
-          }
-          const showTop =
-            gCfg.mode === 'top_bottom' ||
-            (gCfg.mode === 'ignore_equals' && gCfg.ignoreEqualsTopBottom);
-          activeGuideTrackRef.current = {
-            minX: gMinX,
-            maxX: gMaxX,
-            minY: gMinY,
-            maxY: gMaxY,
-            showTop,
-          };
-          setLiveGuidePreview({
-            topY: showTop ? gMinY : undefined,
-            bottomY: gMaxY,
-          });
-        } else {
+        let gMinX = Infinity;
+        let gMaxX = -Infinity;
+        let gMinY = Infinity;
+        let gMaxY = -Infinity;
+        for (let i = 0; i < initialPts.length; i++) {
+          const p = initialPts[i];
+          if (p.x < gMinX) gMinX = p.x;
+          if (p.x > gMaxX) gMaxX = p.x;
+          if (p.y < gMinY) gMinY = p.y;
+          if (p.y > gMaxY) gMaxY = p.y;
+        }
+
+        if (inExistingBand) {
           activeGuideTrackRef.current = null;
           setLiveGuidePreview(null);
+        } else {
+          // Check whether starting inside an unconsumed extension space (below parent bottom guide and above extended line)
+          let matchingExt: GeometricShape | null = null;
+          if (gCfg.extendLines) {
+            let bestDist = Infinity;
+            for (const sh of pageShapesRef.current) {
+              if (
+                !sh.isWritingGuide ||
+                sh.isGhosted ||
+                sh.guideRole !== 'extended' ||
+                sh.guideExtended ||
+                typeof sh.guideExtTop !== 'number'
+              ) {
+                continue;
+              }
+              if (startY > sh.guideExtTop + 2 && startY < sh.y) {
+                const dist = sh.y - startY;
+                if (dist < bestDist) {
+                  bestDist = dist;
+                  matchingExt = sh;
+                }
+              }
+            }
+          }
+
+          if (matchingExt) {
+            const spacing =
+              matchingExt.guideSpacing ||
+              Math.max(24, matchingExt.y - (matchingExt.guideExtTop ?? matchingExt.y - 28));
+            activeGuideTrackRef.current = {
+              kind: 'extend',
+              targetGuideId: matchingExt.id,
+              anchorY: matchingExt.y,
+              spacing,
+              extTop: matchingExt.guideExtTop,
+              groupId: matchingExt.guideGroupId,
+              minX: gMinX,
+              maxX: gMaxX,
+              minY: gMinY,
+              maxY: gMaxY,
+              showTop: false,
+            };
+            setLiveGuidePreview({
+              topY: undefined,
+              bottomY: matchingExt.y + spacing,
+            });
+          } else {
+            const showTop =
+              gCfg.mode === 'top_bottom' ||
+              (gCfg.mode === 'ignore_equals' && gCfg.ignoreEqualsTopBottom);
+            activeGuideTrackRef.current = {
+              kind: 'new',
+              minX: gMinX,
+              maxX: gMaxX,
+              minY: gMinY,
+              maxY: gMaxY,
+              showTop,
+            };
+            setLiveGuidePreview({
+              topY: showTop ? gMinY : undefined,
+              bottomY: gMaxY,
+            });
+          }
         }
       } else {
         activeGuideTrackRef.current = null;
@@ -3548,17 +3856,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             stroke: {
               pageId,
               tool: penType,
-              color: currentColor,
+              color:
+                penType === 'highlighter'
+                  ? getBrightHighlighterColor(currentColor)
+                  : currentColor,
               width: strokeWidth,
-              opacity: penType === 'highlighter' ? 0.35 : 1,
+              opacity: penType === 'highlighter' ? 0.52 : 1,
               points: currentPointsRef.current.slice(),
             },
             writingGuides:
               gt && cfg
                 ? {
                     pageId,
-                    topY: gt.showTop ? gt.minY : undefined,
-                    bottomY: gt.maxY,
+                    topY: gt.kind === 'new' && gt.showTop ? gt.minY : undefined,
+                    bottomY:
+                      gt.kind === 'extend'
+                        ? (gt.anchorY ?? gt.maxY) + (gt.spacing || 28)
+                        : gt.maxY,
                     color: cfg.color,
                     thickness: cfg.thickness,
                     opacity: cfg.opacity,
@@ -3650,7 +3964,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       if (pts.length > prevCount) {
         drawIncrementalLivePoints(pts, currentColor, strokeWidth);
         const track = activeGuideTrackRef.current;
-        if (track) {
+        if (track && track.kind === 'new') {
           let changed = false;
           for (let i = prevCount; i < pts.length; i++) {
             const pt = pts[i];
@@ -4480,8 +4794,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         let gridCols: number | undefined = undefined;
 
         if (shapeType === 'grid') {
-          gridCols = Math.max(2, Math.round(absW / 28));
-          gridRows = Math.max(2, Math.round(absH / 28));
+          gridCols = Math.max(1, Math.round(absW / 28));
+          gridRows = Math.max(1, Math.round(absH / 28));
         }
 
         const newShape: GeometricShape = {
@@ -4490,8 +4804,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           type: shapeType,
           x: shapeType === 'grid' ? minX : shapeDragStart.x,
           y: shapeType === 'grid' ? minY : shapeDragStart.y,
-          width: shapeType === 'grid' ? absW : w,
-          height: shapeType === 'grid' ? absH : h,
+          width: shapeType === 'grid' ? Math.max(20, absW) : w,
+          height: shapeType === 'grid' ? Math.max(20, absH) : h,
           strokeColor: currentColor,
           fillColor:
             shapeFill && shapeFillOpacity > 0
@@ -6479,12 +6793,50 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           {pageStrokes.map((s) => {
             if (!s.points || s.points.length < 1) return null;
             const pathD = pointsToSvgPath(s.points);
+
+            if (!s.isGhosted && s.tool === 'highlighter') {
+              const brightHex = getBrightHighlighterColor(s.color);
+              const dodgeHex = getHighlighterDodgeColor(brightHex);
+              return (
+                <React.Fragment key={s.id}>
+                  <path
+                    d={pathD}
+                    stroke={dodgeHex}
+                    strokeWidth={s.width}
+                    strokeOpacity={0.88}
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{ mixBlendMode: 'color-dodge' }}
+                  />
+                  <path
+                    d={pathD}
+                    stroke={brightHex}
+                    strokeWidth={s.width}
+                    strokeOpacity={0.55}
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{ mixBlendMode: 'color-burn' }}
+                  />
+                  <path
+                    d={pathD}
+                    stroke={brightHex}
+                    strokeWidth={s.width}
+                    strokeOpacity={s.opacity || 0.52}
+                    fill="none"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{ mixBlendMode: 'multiply' }}
+                  />
+                </React.Fragment>
+              );
+            }
+
             const strokeColor = s.isGhosted ? '#DC2626' : s.color;
             const strokeDash = s.isGhosted ? '4 4' : undefined;
             const opacity = s.isGhosted
               ? 0.25
-              : s.tool === 'highlighter'
-              ? s.opacity || 0.35
               : s.tool === 'pencil'
               ? 0.85
               : 1;
@@ -6500,7 +6852,6 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 fill="none"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                style={s.tool === 'highlighter' ? { mixBlendMode: 'multiply' } : undefined}
               />
             );
           })}
@@ -6510,28 +6861,59 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             <g>
               {externalLiveOverlay.stroke &&
                 externalLiveOverlay.stroke.pageId === pageId &&
-                externalLiveOverlay.stroke.points.length >= 1 && (
+                externalLiveOverlay.stroke.points.length >= 1 &&
+                (externalLiveOverlay.stroke.tool === 'highlighter' ? (
+                  (() => {
+                    const liveStrk = externalLiveOverlay.stroke!;
+                    const livePathD = pointsToSvgPath(liveStrk.points);
+                    const brightHex = getBrightHighlighterColor(liveStrk.color);
+                    const dodgeHex = getHighlighterDodgeColor(brightHex);
+                    return (
+                      <>
+                        <path
+                          d={livePathD}
+                          stroke={dodgeHex}
+                          strokeWidth={liveStrk.width}
+                          strokeOpacity={0.88}
+                          fill="none"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          style={{ mixBlendMode: 'color-dodge' }}
+                        />
+                        <path
+                          d={livePathD}
+                          stroke={brightHex}
+                          strokeWidth={liveStrk.width}
+                          strokeOpacity={0.55}
+                          fill="none"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          style={{ mixBlendMode: 'color-burn' }}
+                        />
+                        <path
+                          d={livePathD}
+                          stroke={brightHex}
+                          strokeWidth={liveStrk.width}
+                          strokeOpacity={0.52}
+                          fill="none"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          style={{ mixBlendMode: 'multiply' }}
+                        />
+                      </>
+                    );
+                  })()
+                ) : (
                   <path
                     d={pointsToSvgPath(externalLiveOverlay.stroke.points)}
                     stroke={externalLiveOverlay.stroke.color}
                     strokeWidth={externalLiveOverlay.stroke.width}
-                    opacity={
-                      externalLiveOverlay.stroke.tool === 'highlighter'
-                        ? 0.35
-                        : externalLiveOverlay.stroke.tool === 'pencil'
-                        ? 0.85
-                        : 1
-                    }
+                    opacity={externalLiveOverlay.stroke.tool === 'pencil' ? 0.85 : 1}
                     fill="none"
                     strokeLinecap="round"
                     strokeLinejoin="round"
-                    style={
-                      externalLiveOverlay.stroke.tool === 'highlighter'
-                        ? { mixBlendMode: 'multiply' }
-                        : undefined
-                    }
                   />
-                )}
+                ))}
 
               {externalLiveOverlay.shape &&
                 externalLiveOverlay.shape.pageId === pageId &&
@@ -6853,8 +7235,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   shapeStyle === 'dashed' ? '8 6' : shapeStyle === 'dotted' ? '3 4' : undefined;
 
                 if (shapeType === 'grid') {
-                  const cols = Math.max(2, Math.round(absW / 28));
-                  const rows = Math.max(2, Math.round(absH / 28));
+                  const cols = Math.max(1, Math.round(absW / 28));
+                  const rows = Math.max(1, Math.round(absH / 28));
                   return (
                     <g key="grid-preview">
                       <rect
@@ -7442,7 +7824,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
             ref={liveCanvasRef}
             style={{
               touchAction: 'none',
-              opacity: penType === 'highlighter' ? 0.35 : penType === 'pencil' ? 0.85 : 1,
+              opacity: penType === 'highlighter' ? 0.56 : penType === 'pencil' ? 0.85 : 1,
               mixBlendMode: penType === 'highlighter' ? 'multiply' : 'normal',
             }}
             className="live-ink-canvas absolute inset-0 w-full h-full pointer-events-none z-[36]"
@@ -7916,6 +8298,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   }
                   if (typeof drag.origBandBottom === 'number') {
                     patch.guideBandBottom = drag.origBandBottom + dy;
+                  }
+                  if (typeof selLine.guideExtTop === 'number') {
+                    patch.guideExtTop = selLine.guideExtTop + dy;
                   }
                   onUpdateShape(drag.shapeId, patch);
                 } else if (drag.mode === 'start') {

@@ -144,11 +144,13 @@ interface VirtualizedPageSlotProps {
   onChangeGridDimsDraft?: (shapeId: string, field: 'cols' | 'rows', draft: string) => void;
   onStopEditGridDims?: () => void;
   writingGuideConfig?: WritingGuideConfig;
+  autoStraightenLines?: boolean;
   onToggleWritingGuidesQuick?: () => void;
   onCommitDrawingStroke?: (
     stroke: CanvasStroke,
     guideShapesToAdd?: GeometricShape[],
-    shapeIdsToDelete?: string[]
+    shapeIdsToDelete?: string[],
+    shapePatches?: Array<{ id: string; patch: Partial<GeometricShape> }>
   ) => void;
   onAddStroke: (stroke: CanvasStroke) => void;
   onAddShape: (shape: GeometricShape) => void;
@@ -295,6 +297,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
   onChangeGridDimsDraft,
   onStopEditGridDims,
   writingGuideConfig,
+  autoStraightenLines = false,
   onToggleWritingGuidesQuick,
   onCommitDrawingStroke,
   onAddStroke,
@@ -716,6 +719,7 @@ const VirtualizedPageSlotInner: React.FC<VirtualizedPageSlotProps> = ({
             calculators={pageCalculators}
             images={pageImages}
             writingGuideConfig={writingGuideConfig}
+            autoStraightenLines={autoStraightenLines}
             onToggleWritingGuidesQuick={onToggleWritingGuidesQuick}
             onCommitDrawingStroke={onCommitDrawingStroke}
             onAddStroke={onAddStroke}

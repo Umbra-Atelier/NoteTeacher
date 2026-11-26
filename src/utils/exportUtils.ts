@@ -22,6 +22,7 @@ import {
 } from './widgetSnapshotCache';
 import { getPdfRawBytes, resolvePdfPageDataUrl } from './pdfPageCache';
 import { buildNativeEditedPdfBlob } from './pdfNativeWriter';
+import { getBrightHighlighterColor, getHighlighterDodgeColor } from './colorUtils';
 
 export interface ProjectData {
   version: string;
@@ -480,8 +481,8 @@ function drawGridShape(
   const y = Math.min(sh.y, sh.y + sh.height) * scaleY;
   const w = Math.max(20, Math.abs(sh.width)) * scaleX;
   const h = Math.max(20, Math.abs(sh.height)) * scaleY;
-  const rows = sh.gridRows || Math.max(2, Math.round(Math.abs(sh.height) / 28));
-  const cols = sh.gridCols || Math.max(2, Math.round(Math.abs(sh.width) / 28));
+  const rows = sh.gridRows || Math.max(1, Math.round(Math.abs(sh.height) / 28));
+  const cols = sh.gridCols || Math.max(1, Math.round(Math.abs(sh.width) / 28));
   const strokeColor = sh.isGhosted ? '#EF4444' : sh.strokeColor || '#2563EB';
   const baseW = (sh.strokeWidth || 1.5) * avgScale;
 
@@ -756,16 +757,63 @@ function drawFreehandStroke(
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
+  const traceStrokePath = () => {
+    if (s.points.length === 1) {
+      ctx.beginPath();
+      ctx.arc(
+        s.points[0].x * scaleX,
+        s.points[0].y * scaleY,
+        Math.max(0.5 * avgScale, (s.width * avgScale) / 2),
+        0,
+        Math.PI * 2
+      );
+      return true;
+    }
+    ctx.beginPath();
+    ctx.moveTo(s.points[0].x * scaleX, s.points[0].y * scaleY);
+    for (let i = 1; i < s.points.length; i++) {
+      const p1 = s.points[i - 1];
+      const p2 = s.points[i];
+      const midX = ((p1.x + p2.x) / 2) * scaleX;
+      const midY = ((p1.y + p2.y) / 2) * scaleY;
+      ctx.quadraticCurveTo(p1.x * scaleX, p1.y * scaleY, midX, midY);
+    }
+    const lastP = s.points[s.points.length - 1];
+    ctx.lineTo(lastP.x * scaleX, lastP.y * scaleY);
+    return false;
+  };
+
+  if (!s.isGhosted && s.tool === 'highlighter') {
+    const brightHex = getBrightHighlighterColor(s.color);
+    const dodgeHex = getHighlighterDodgeColor(brightHex);
+    const passes: Array<{
+      op: GlobalCompositeOperation;
+      color: string;
+      alpha: number;
+    }> = [
+      { op: 'color-dodge', color: dodgeHex, alpha: 0.88 },
+      { op: 'color-burn', color: brightHex, alpha: 0.55 },
+      { op: 'multiply', color: brightHex, alpha: s.opacity || 0.52 },
+    ];
+    ctx.lineWidth = s.width * avgScale;
+    for (const pass of passes) {
+      ctx.globalCompositeOperation = pass.op;
+      ctx.globalAlpha = pass.alpha;
+      ctx.strokeStyle = pass.color;
+      ctx.fillStyle = pass.color;
+      const isDot = traceStrokePath();
+      if (isDot) ctx.fill();
+      else ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+
   if (s.isGhosted) {
     ctx.globalAlpha = 0.25;
     ctx.strokeStyle = '#DC2626';
     ctx.fillStyle = '#DC2626';
     ctx.setLineDash([4 * avgScale, 4 * avgScale]);
-  } else if (s.tool === 'highlighter') {
-    ctx.globalAlpha = s.opacity || 0.35;
-    ctx.globalCompositeOperation = 'multiply';
-    ctx.strokeStyle = s.color;
-    ctx.fillStyle = s.color;
   } else if (s.tool === 'pencil') {
     ctx.globalAlpha = 0.85;
     ctx.strokeStyle = s.color;
@@ -777,33 +825,9 @@ function drawFreehandStroke(
   }
 
   ctx.lineWidth = s.width * avgScale;
-
-  if (s.points.length === 1) {
-    ctx.beginPath();
-    ctx.arc(
-      s.points[0].x * scaleX,
-      s.points[0].y * scaleY,
-      Math.max(0.5 * avgScale, (s.width * avgScale) / 2),
-      0,
-      Math.PI * 2
-    );
-    ctx.fill();
-    ctx.restore();
-    return;
-  }
-
-  ctx.beginPath();
-  ctx.moveTo(s.points[0].x * scaleX, s.points[0].y * scaleY);
-  for (let i = 1; i < s.points.length; i++) {
-    const p1 = s.points[i - 1];
-    const p2 = s.points[i];
-    const midX = ((p1.x + p2.x) / 2) * scaleX;
-    const midY = ((p1.y + p2.y) / 2) * scaleY;
-    ctx.quadraticCurveTo(p1.x * scaleX, p1.y * scaleY, midX, midY);
-  }
-  const lastP = s.points[s.points.length - 1];
-  ctx.lineTo(lastP.x * scaleX, lastP.y * scaleY);
-  ctx.stroke();
+  const isDot = traceStrokePath();
+  if (isDot) ctx.fill();
+  else ctx.stroke();
   ctx.restore();
 }
 

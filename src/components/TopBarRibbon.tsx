@@ -95,7 +95,12 @@ import {
   WritingGuideMode,
 } from '../types';
 import { MicPermissionState } from '../utils/speechDictation';
-import { hsvToHex, hexToHsv, hexWithAlphaPercent } from '../utils/colorUtils';
+import {
+  hsvToHex,
+  hexToHsv,
+  hexWithAlphaPercent,
+  getBrightHighlighterColor,
+} from '../utils/colorUtils';
 import { captureAllMountedWidgets } from '../utils/widgetSnapshotCache';
 import { FileExplorerView } from './explorer/FileExplorerView';
 import { AnchoredScreenPopup } from './ViewportPortalPopup';
@@ -133,6 +138,8 @@ interface TopBarRibbonProps {
   onSetCurrentColor: (color: string) => void;
   writingGuideConfig?: WritingGuideConfig;
   onUpdateWritingGuideConfig?: (updated: Partial<WritingGuideConfig>) => void;
+  autoStraightenLines?: boolean;
+  onToggleAutoStraightenLines?: () => void;
   documentColors: string[];
   paletteColors: string[];
   onUpdatePaletteColors: (cols: string[]) => void;
@@ -319,11 +326,14 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
     quickPaused: false,
     mode: 'bottom',
     ignoreEqualsTopBottom: false,
+    extendLines: false,
     thickness: 1.5,
     opacity: 0.45,
     color: '#5B7FA6',
   },
   onUpdateWritingGuideConfig,
+  autoStraightenLines = false,
+  onToggleAutoStraightenLines,
   documentColors,
   paletteColors = [],
   onUpdatePaletteColors,
@@ -553,6 +563,8 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
   const [showAddPageOptions, setShowAddPageOptions] = useState(false);
   const [showWritingGuideMenu, setShowWritingGuideMenu] = useState(false);
   const writingGuideAnchorRef = useRef<HTMLDivElement | null>(null);
+  const [showAutoStraightenInfo, setShowAutoStraightenInfo] = useState(false);
+  const autoStraightenAnchorRef = useRef<HTMLDivElement | null>(null);
 
   // PDF Editor formatting popups & font size draft
   const [showPdfFontSizeMenu, setShowPdfFontSizeMenu] = useState(false);
@@ -1000,7 +1012,10 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
             <div
               style={{
                 left: `${(hue / 360) * 100}%`,
-                backgroundColor: hsvToHex(hue, saturation, brightness),
+                backgroundColor:
+                  mode === 'drawing' && penType === 'highlighter'
+                    ? getBrightHighlighterColor(hsvToHex(hue, saturation, brightness))
+                    : hsvToHex(hue, saturation, brightness),
               }}
               className={`absolute top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white ring-2 ring-black/30 shadow-lg pointer-events-none transition-[width,height] ${
                 isSlidingRainbow ? 'w-6 h-6' : 'w-5 h-5'
@@ -1040,7 +1055,12 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                     <span className="font-bold text-slate-800 dark:text-slate-100">Color Tuner</span>
                     <div
                       className="w-6 h-6 rounded-md shadow-xs border"
-                      style={{ backgroundColor: currentColor }}
+                      style={{
+                        backgroundColor:
+                          mode === 'drawing' && penType === 'highlighter'
+                            ? getBrightHighlighterColor(currentColor)
+                            : currentColor,
+                      }}
                     />
                   </div>
                   <div>
@@ -1086,7 +1106,14 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
 
         {/* Outside swatches (up to 6) */}
         {outsidePaletteColors.map((colorHex, idx) => {
-          const isSelected = currentColor.toUpperCase() === colorHex.toUpperCase();
+          const isHighlighterMode = mode === 'drawing' && penType === 'highlighter';
+          const displayHex = isHighlighterMode
+            ? getBrightHighlighterColor(colorHex)
+            : colorHex;
+          const isSelected =
+            currentColor.toUpperCase() === colorHex.toUpperCase() ||
+            (isHighlighterMode &&
+              currentColor.toUpperCase() === displayHex.toUpperCase());
           const isOver = dragOverPaletteIndex === idx;
 
           return (
@@ -1112,7 +1139,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                 setDraggedPaletteIndex(null);
                 setDragOverPaletteIndex(null);
               }}
-              title={`Select ${colorHex} (Hold and drag to reorder like homescreen apps)`}
+              title={`Select ${displayHex} (Hold and drag to reorder like homescreen apps)`}
               onClick={() => handleSelectPaletteColor(colorHex)}
               className={`rounded-full transition-all border relative cursor-grab active:cursor-grabbing ${
                 isSelected && isSlidingRainbow
@@ -1121,7 +1148,7 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   ? 'w-6 h-6 scale-120 ring-2 ring-blue-500 ring-offset-2 dark:ring-offset-slate-900 border-white shadow-md'
                   : 'w-6 h-6 hover:scale-110 border-slate-300 dark:border-slate-600'
               } ${isOver ? 'ring-2 ring-amber-400 scale-125' : ''}`}
-              style={{ backgroundColor: colorHex }}
+              style={{ backgroundColor: displayHex }}
             />
           );
         })}
@@ -1175,7 +1202,15 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                     <div className="grid grid-cols-5 gap-2 max-h-36 overflow-y-auto p-1">
                       {overflowPaletteColors.map((hex, overflowIdx) => {
                         const realIdx = 6 + overflowIdx;
-                        const isSelected = currentColor.toUpperCase() === hex.toUpperCase();
+                        const isHighlighterMode =
+                          mode === 'drawing' && penType === 'highlighter';
+                        const displayHex = isHighlighterMode
+                          ? getBrightHighlighterColor(hex)
+                          : hex;
+                        const isSelected =
+                          currentColor.toUpperCase() === hex.toUpperCase() ||
+                          (isHighlighterMode &&
+                            currentColor.toUpperCase() === displayHex.toUpperCase());
                         return (
                           <button
                             key={`overflow-${hex}-${realIdx}`}
@@ -1189,13 +1224,13 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                               handleSelectPaletteColor(hex);
                               setShowPaletteOverflow(false);
                             }}
-                            title={`${hex} - Click to select this color`}
+                            title={`${displayHex} - Click to select this color`}
                             className={`w-8 h-8 rounded-full border border-slate-300 dark:border-slate-600 hover:scale-110 transition-transform cursor-grab active:cursor-grabbing ${
                               isSelected
                                 ? 'ring-2 ring-blue-500 ring-offset-2 dark:ring-offset-slate-900'
                                 : ''
                             }`}
-                            style={{ backgroundColor: hex }}
+                            style={{ backgroundColor: displayHex }}
                           />
                         );
                       })}
@@ -2595,12 +2630,15 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                   />
                   <span className="font-mono text-[11px] text-slate-500 w-5">{strokeWidth}</span>
                   <div
-                    className="rounded-full shrink-0"
+                    className="rounded-full shrink-0 border border-slate-300/60 dark:border-slate-600/60"
                     style={{
                       width: `${Math.min(22, Math.max(4, strokeWidth))}px`,
                       height: `${Math.min(22, Math.max(4, strokeWidth))}px`,
-                      backgroundColor: currentColor,
-                      opacity: penType === 'highlighter' ? 0.4 : 1,
+                      backgroundColor:
+                        penType === 'highlighter'
+                          ? getBrightHighlighterColor(currentColor)
+                          : currentColor,
+                      opacity: penType === 'highlighter' ? 0.82 : 1,
                     }}
                   />
                 </div>
@@ -2784,6 +2822,42 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                           </span>
                         </label>
                       )}
+
+                      <div className="pt-1.5 border-t border-slate-100 dark:border-slate-800">
+                        <label className="flex items-start gap-2.5 px-2 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/50 cursor-pointer select-none hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+                          <input
+                            type="checkbox"
+                            data-testid="guide-extend-lines-toggle"
+                            checked={Boolean(writingGuideConfig.extendLines)}
+                            onChange={(e) =>
+                              onUpdateWritingGuideConfig?.({
+                                extendLines: e.target.checked,
+                              })
+                            }
+                            className="mt-0.5 accent-blue-600 rounded cursor-pointer shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-800 dark:text-slate-100">
+                                Extend Line
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                  writingGuideConfig.extendLines
+                                    ? 'bg-blue-600 text-white'
+                                    : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                                }`}
+                              >
+                                {writingGuideConfig.extendLines ? 'On' : 'Off'}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                              Places a spaced line below your bottom guide. Writing inside that
+                              space extends the next line down; writing outside starts fresh.
+                            </p>
+                          </div>
+                        </label>
+                      </div>
                     </div>
 
                     <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2.5">
@@ -2870,6 +2944,98 @@ export const TopBarRibbon: React.FC<TopBarRibbonProps> = ({
                           />
                         </div>
                       </div>
+                    </div>
+                  </div>
+                </AnchoredScreenPopup>
+              )}
+            </div>
+
+            {/* Compact Icon-Only Auto-Straighten Lines Toggle + Click-to-Explain Popover */}
+            <div ref={autoStraightenAnchorRef} className="flex items-center">
+              <button
+                type="button"
+                data-testid="drawing-straighten-toggle"
+                aria-label="Auto-straighten lines"
+                aria-pressed={autoStraightenLines}
+                onClick={() => {
+                  onToggleAutoStraightenLines?.();
+                  setShowAutoStraightenInfo(true);
+                }}
+                title="Auto-straighten lines"
+                className={`p-2 rounded-xl border transition-colors shrink-0 ${
+                  autoStraightenLines
+                    ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
+                    : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white dark:hover:bg-slate-700'
+                }`}
+              >
+                <svg
+                  viewBox="0 0 20 20"
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  {/* Wavy freehand curve faint path transforming into crisp straight line with endpoints */}
+                  <path
+                    d="M3 13.5C5.2 9.5 7.5 16 10 10.5C12.2 5.5 14.8 11 17 6.5"
+                    strokeDasharray="2 2"
+                    opacity="0.55"
+                  />
+                  <line x1="3.5" y1="15.5" x2="16.5" y2="4.5" strokeWidth="2.1" />
+                  <circle cx="3.5" cy="15.5" r="1.4" fill="currentColor" stroke="none" />
+                  <circle cx="16.5" cy="4.5" r="1.4" fill="currentColor" stroke="none" />
+                </svg>
+              </button>
+
+              {showAutoStraightenInfo && (
+                <AnchoredScreenPopup
+                  anchorRef={autoStraightenAnchorRef}
+                  placement="bottom"
+                  align="end"
+                  gap={8}
+                  zIndexClass="z-[9996]"
+                  onClose={() => setShowAutoStraightenInfo(false)}
+                >
+                  <div
+                    data-testid="drawing-straighten-info-popover"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="ui-scale-target w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl p-3 space-y-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">
+                        Auto-Straighten Lines
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                          autoStraightenLines
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200'
+                        }`}
+                      >
+                        {autoStraightenLines ? 'On' : 'Off'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-snug">
+                      Draw curves and handwriting freely as normal. When a stroke is roughly
+                      straight, lifting your pen snaps it into a crisp straight line.
+                    </p>
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => onToggleAutoStraightenLines?.()}
+                        className="px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 font-medium text-slate-700 dark:text-slate-200 transition-colors"
+                      >
+                        {autoStraightenLines ? 'Turn Off' : 'Turn On'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowAutoStraightenInfo(false)}
+                        className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-semibold transition-colors"
+                      >
+                        Done
+                      </button>
                     </div>
                   </div>
                 </AnchoredScreenPopup>

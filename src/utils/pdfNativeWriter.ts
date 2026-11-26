@@ -1,4 +1,5 @@
 import {
+  BlendMode,
   PDFArray,
   PDFDocument,
   PDFFont,
@@ -34,6 +35,7 @@ import {
   getDesmosSnapshot,
   getRecordedPageStageSize,
 } from './widgetSnapshotCache';
+import { getBrightHighlighterColor } from './colorUtils';
 
 function parseHexRgb(hex: string | undefined): { r: number; g: number; b: number } {
   const clean = (hex || '#000000').replace('#', '').trim();
@@ -1074,13 +1076,15 @@ function drawNoteTeacherVectorOverlays(
   // Ink strokes
   for (const s of pageStrokes) {
     if (s.isGhosted || !s.points || s.points.length === 0) continue;
-    const { r, g, b } = parseHexRgb(s.color);
+    const drawHex = s.tool === 'highlighter' ? getBrightHighlighterColor(s.color) : s.color;
+    const { r, g, b } = parseHexRgb(drawHex);
     const col = rgb(r, g, b);
-    const op = s.tool === 'highlighter' ? s.opacity || 0.35 : s.tool === 'pencil' ? 0.85 : 1;
+    const op = s.tool === 'highlighter' ? Math.max(0.45, s.opacity || 0.52) : s.tool === 'pencil' ? 0.85 : 1;
+    const blend = s.tool === 'highlighter' ? BlendMode.Multiply : BlendMode.Normal;
     const thick = Math.max(0.6, s.width * avgScale);
     if (s.points.length === 1) {
       const pt = toPt(s.points[0].x, s.points[0].y);
-      page.drawCircle({ x: pt.x, y: pt.y, size: thick / 2, color: col, opacity: op });
+      page.drawCircle({ x: pt.x, y: pt.y, size: thick / 2, color: col, opacity: op, blendMode: blend });
       continue;
     }
     for (let i = 1; i < s.points.length; i++) {
@@ -1090,6 +1094,7 @@ function drawNoteTeacherVectorOverlays(
         thickness: thick,
         color: col,
         opacity: op,
+        blendMode: blend,
       });
     }
   }

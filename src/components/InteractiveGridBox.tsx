@@ -44,8 +44,8 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
   const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Rows and Cols are frozen from initial creation and NEVER change on resize!
-  const rows = shape.gridRows || Math.max(2, Math.round(Math.abs(shape.height) / 28));
-  const cols = shape.gridCols || Math.max(2, Math.round(Math.abs(shape.width) / 28));
+  const rows = shape.gridRows || Math.max(1, Math.round(Math.abs(shape.height) / 28));
+  const cols = shape.gridCols || Math.max(1, Math.round(Math.abs(shape.width) / 28));
 
   const strokeColor = shape.isGhosted ? '#EF4444' : shape.strokeColor || '#2563EB';
   const strokeDash =
@@ -107,70 +107,143 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
     };
   }, [isDragging, dragStart, onUpdate, zoomScale]);
 
-  // Top-Right L-Grab Resizing (Number of lines remains frozen, scaled by perspective zoom)
-  const startResizeTR = (startX: number, startY: number) => {
-    const startY0 = shape.y;
-    const startW = shape.width;
-    const startH = shape.height;
-    const aspect = startW / startH;
+  const projectDeltaToLocal = (screenDx: number, screenDy: number) => {
     const scale = zoomScale || 1;
-
-    const onPointerMove = (ev: PointerEvent) => {
-      ev.preventDefault();
-      const dx = (ev.clientX - startX) / scale;
-      const dy = (startY - ev.clientY) / scale;
-      const delta = (dx + dy) / 2;
-      const newW = Math.max(60, Math.min(1400, startW + delta));
-      const newH = newW / aspect;
-      const newY = startY0 - (newH - startH);
-
-      onUpdate({
-        y: Math.max(0, newY),
-        width: newW,
-        height: newH,
-        // Number of lines across and up/down remains strictly preserved
-        gridRows: rows,
-        gridCols: cols,
-      });
+    const dx = screenDx / scale;
+    const dy = screenDy / scale;
+    const deg = shape.rotation || 0;
+    if (!deg) {
+      return { localDx: dx, localDy: dy, cos: 1, sin: 0 };
+    }
+    const rad = (deg * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    return {
+      localDx: dx * cos + dy * sin,
+      localDy: -dx * sin + dy * cos,
+      cos,
+      sin,
     };
-
-    const onEnd = () => {
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', onEnd);
-      window.removeEventListener('pointercancel', onEnd);
-    };
-
-    window.addEventListener('pointermove', onPointerMove, { passive: false });
-    window.addEventListener('pointerup', onEnd);
-    window.addEventListener('pointercancel', onEnd);
   };
 
-  const handlePointerDownResizeTR = (e: React.PointerEvent) => {
-    if (e.pointerType === 'touch' && !allowFingerControls) return;
-    e.preventDefault();
-    e.stopPropagation();
-    startResizeTR(e.clientX, e.clientY);
+  // Helper to update width/height around a fixed local edge/corner point (respecting optional rotation)
+  const computeRotatedBoxForAnchor = (
+    startX0: number,
+    startY0: number,
+    startW: number,
+    startH: number,
+    newW: number,
+    newH: number,
+    anchorNormX: number, // 0 = left, 0.5 = center, 1 = right
+    anchorNormY: number, // 0 = top, 0.5 = center, 1 = bottom
+    cos: number,
+    sin: number
+  ) => {
+    if (cos === 1 && sin === 0) {
+      const nextX = startX0 + (startW - newW) * anchorNormX;
+      const nextY = startY0 + (startH - newH) * anchorNormY;
+      return { x: nextX, y: nextY };
+    }
+    const oldCx = startX0 + startW / 2;
+    const oldCy = startY0 + startH / 2;
+    const oldOffX = (anchorNormX - 0.5) * startW;
+    const oldOffY = (anchorNormY - 0.5) * startH;
+    const anchorWorldX = oldCx + oldOffX * cos - oldOffY * sin;
+    const anchorWorldY = oldCy + oldOffX * sin + oldOffY * cos;
+
+    const newOffX = (anchorNormX - 0.5) * newW;
+    const newOffY = (anchorNormY - 0.5) * newH;
+    const newCx = anchorWorldX - (newOffX * cos - newOffY * sin);
+    const newCy = anchorWorldY - (newOffX * sin + newOffY * cos);
+    return {
+      x: newCx - newW / 2,
+      y: newCy - newH / 2,
+    };
   };
 
-  // Bottom-Left L-Grab Resizing (Number of lines remains frozen, scaled by perspective zoom)
-  const startResizeBL = (startX: number, startY: number) => {
+  // Unified 4-Corner Proportional Resize (Maintains exact width:height aspect ratio & frozen rows/cols)
+  const startCornerResize = (
+    corner: 'tl' | 'tr' | 'bl' | 'br',
+    startClientX: number,
+    startClientY: number
+  ) => {
     const startX0 = shape.x;
-    const startW = shape.width;
-    const startH = shape.height;
+    const startY0 = shape.y;
+    const startW = Math.max(20, shape.width);
+    const startH = Math.max(20, shape.height);
     const aspect = startW / startH;
-    const scale = zoomScale || 1;
+
+    const signX = corner === 'tr' || corner === 'br' ? 1 : -1;
+    const signY = corner === 'bl' || corner === 'br' ? 1 : -1;
+    const anchorNormX = signX === 1 ? 0 : 1;
+    const anchorNormY = signY === 1 ? 0 : 1;
 
     const onPointerMove = (ev: PointerEvent) => {
       ev.preventDefault();
-      const dx = (startX - ev.clientX) / scale;
-      const dy = (ev.clientY - startY) / scale;
-      const delta = (dx + dy) / 2;
-      const newW = Math.max(60, Math.min(1400, startW + delta));
-      const newH = newW / aspect;
-      const newX = startX0 - (newW - startW);
+      const { localDx, localDy, cos, sin } = projectDeltaToLocal(
+        ev.clientX - startClientX,
+        ev.clientY - startClientY
+      );
+      const scaleW = (startW + signX * localDx) / startW;
+      const scaleH = (startH + signY * localDy) / startH;
+      const avgScale = (scaleW + scaleH) / 2;
+
+      const minW = Math.max(20, 20 * aspect);
+      const maxW = Math.min(1400, 1400 * aspect);
+      let newW = Math.max(minW, Math.min(maxW, startW * avgScale));
+      let newH = newW / aspect;
+
+      let pos = computeRotatedBoxForAnchor(
+        startX0,
+        startY0,
+        startW,
+        startH,
+        newW,
+        newH,
+        anchorNormX,
+        anchorNormY,
+        cos,
+        sin
+      );
+
+      if (cos === 1 && sin === 0) {
+        if (pos.x < 0 && anchorNormX === 1) {
+          newW = Math.max(20, startX0 + startW);
+          newH = newW / aspect;
+          pos = computeRotatedBoxForAnchor(
+            startX0,
+            startY0,
+            startW,
+            startH,
+            newW,
+            newH,
+            anchorNormX,
+            anchorNormY,
+            cos,
+            sin
+          );
+        }
+        if (pos.y < 0 && anchorNormY === 1) {
+          newH = Math.max(20, startY0 + startH);
+          newW = newH * aspect;
+          pos = computeRotatedBoxForAnchor(
+            startX0,
+            startY0,
+            startW,
+            startH,
+            newW,
+            newH,
+            anchorNormX,
+            anchorNormY,
+            cos,
+            sin
+          );
+        }
+      }
 
       onUpdate({
-        x: Math.max(0, newX),
+        x: Math.max(0, pos.x),
+        y: Math.max(0, pos.y),
         width: newW,
         height: newH,
         gridRows: rows,
@@ -189,11 +262,102 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
     window.addEventListener('pointercancel', onEnd);
   };
 
-  const handlePointerDownResizeBL = (e: React.PointerEvent) => {
+  // Directional Edge Stretch (Right/Left stretch width only; Up/Down stretch height only)
+  const startEdgeStretch = (
+    edge: 'left' | 'right' | 'top' | 'bottom',
+    startClientX: number,
+    startClientY: number
+  ) => {
+    const startX0 = shape.x;
+    const startY0 = shape.y;
+    const startW = Math.max(20, shape.width);
+    const startH = Math.max(20, shape.height);
+
+    const isHorizontal = edge === 'left' || edge === 'right';
+    const sign = edge === 'right' || edge === 'bottom' ? 1 : -1;
+    const anchorNormX = edge === 'left' ? 1 : edge === 'right' ? 0 : 0.5;
+    const anchorNormY = edge === 'top' ? 1 : edge === 'bottom' ? 0 : 0.5;
+
+    const onPointerMove = (ev: PointerEvent) => {
+      ev.preventDefault();
+      const { localDx, localDy, cos, sin } = projectDeltaToLocal(
+        ev.clientX - startClientX,
+        ev.clientY - startClientY
+      );
+
+      let newW = startW;
+      let newH = startH;
+      if (isHorizontal) {
+        newW = Math.max(20, Math.min(1400, startW + sign * localDx));
+      } else {
+        newH = Math.max(20, Math.min(1400, startH + sign * localDy));
+      }
+
+      const pos = computeRotatedBoxForAnchor(
+        startX0,
+        startY0,
+        startW,
+        startH,
+        newW,
+        newH,
+        anchorNormX,
+        anchorNormY,
+        cos,
+        sin
+      );
+
+      let finalX = pos.x;
+      let finalY = pos.y;
+      if (cos === 1 && sin === 0) {
+        if (edge === 'left' && finalX < 0) {
+          newW = Math.max(20, startX0 + startW);
+          finalX = 0;
+        }
+        if (edge === 'top' && finalY < 0) {
+          newH = Math.max(20, startY0 + startH);
+          finalY = 0;
+        }
+      }
+
+      onUpdate({
+        x: Math.max(0, finalX),
+        y: Math.max(0, finalY),
+        width: newW,
+        height: newH,
+        gridRows: rows,
+        gridCols: cols,
+      });
+    };
+
+    const onEnd = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onEnd);
+      window.removeEventListener('pointercancel', onEnd);
+    };
+
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onEnd);
+    window.addEventListener('pointercancel', onEnd);
+  };
+
+  const handleCornerPointerDown = (
+    corner: 'tl' | 'tr' | 'bl' | 'br',
+    e: React.PointerEvent
+  ) => {
     if (e.pointerType === 'touch' && !allowFingerControls) return;
     e.preventDefault();
     e.stopPropagation();
-    startResizeBL(e.clientX, e.clientY);
+    startCornerResize(corner, e.clientX, e.clientY);
+  };
+
+  const handleEdgePointerDown = (
+    edge: 'left' | 'right' | 'top' | 'bottom',
+    e: React.PointerEvent
+  ) => {
+    if (e.pointerType === 'touch' && !allowFingerControls) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startEdgeStretch(edge, e.clientX, e.clientY);
   };
 
   const w = Math.max(20, shape.width);
@@ -202,6 +366,7 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
   return (
     <div
       ref={containerRef}
+      data-testid={`interactive-grid-box-${shape.id}`}
       onClick={(e) => {
         if (!allowFingerControls && lastPointerTypeRef.current === 'touch') return;
         e.stopPropagation();
@@ -294,14 +459,29 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
       </svg>
 
       {/* ============================================================== */}
-      {/* ACTIVE CONTROLS (L-Grabs, Compass Move, Delete)                 */}
+      {/* ACTIVE CONTROLS (4 Proportional Corners + 4 Directional Edges) */}
       {/* ============================================================== */}
       {isActive && !hideChrome && (
         <>
-          {/* TOP-RIGHT L-GRAB RESIZE HANDLE (Proportional) */}
+          {/* TOP-LEFT CORNER RESIZE HANDLE (Proportional) */}
           <div
-            onPointerDown={handlePointerDownResizeTR}
-            title="Drag L-handle to resize grid (line count remains preserved)"
+            data-testid="grid-resize-tl"
+            onPointerDown={(e) => handleCornerPointerDown('tl', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag corner to resize entire grid proportionally"
+            className="absolute -top-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nwse-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
+          >
+            <div className="w-5 h-5 border-t-3 border-l-3 border-indigo-600 rounded-tl-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-500">
+              <div className="w-1.5 h-1.5 bg-indigo-600 rounded-full" />
+            </div>
+          </div>
+
+          {/* TOP-RIGHT CORNER RESIZE HANDLE (Proportional) */}
+          <div
+            data-testid="grid-resize-tr"
+            onPointerDown={(e) => handleCornerPointerDown('tr', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag corner to resize entire grid proportionally"
             className="absolute -top-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
           >
             <div className="w-5 h-5 border-t-3 border-r-3 border-indigo-600 rounded-tr-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-500">
@@ -309,14 +489,81 @@ export const InteractiveGridBox: React.FC<InteractiveGridBoxProps> = ({
             </div>
           </div>
 
-          {/* BOTTOM-LEFT L-GRAB RESIZE HANDLE (Proportional) */}
+          {/* BOTTOM-LEFT CORNER RESIZE HANDLE (Proportional) */}
           <div
-            onPointerDown={handlePointerDownResizeBL}
-            title="Drag L-handle to resize grid (line count remains preserved)"
+            data-testid="grid-resize-bl"
+            onPointerDown={(e) => handleCornerPointerDown('bl', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag corner to resize entire grid proportionally"
             className="absolute -bottom-3.5 -left-3.5 w-7 h-7 flex items-center justify-center cursor-nesw-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
           >
             <div className="w-5 h-5 border-b-3 border-l-3 border-indigo-600 rounded-bl-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-500">
               <div className="w-1.5 h-1.5 bg-indigo-600 rounded-full" />
+            </div>
+          </div>
+
+          {/* BOTTOM-RIGHT CORNER RESIZE HANDLE (Proportional) */}
+          <div
+            data-testid="grid-resize-br"
+            onPointerDown={(e) => handleCornerPointerDown('br', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag corner to resize entire grid proportionally"
+            className="absolute -bottom-3.5 -right-3.5 w-7 h-7 flex items-center justify-center cursor-nwse-resize hover:scale-125 transition-transform z-50 group pointer-events-auto touch-none"
+          >
+            <div className="w-5 h-5 border-b-3 border-r-3 border-indigo-600 rounded-br-md bg-white dark:bg-slate-900 shadow-md flex items-center justify-center group-hover:border-indigo-500">
+              <div className="w-1.5 h-1.5 bg-indigo-600 rounded-full" />
+            </div>
+          </div>
+
+          {/* TOP EDGE STRETCH HANDLE (Stretch Up Only) */}
+          <div
+            data-testid="grid-stretch-top"
+            onPointerDown={(e) => handleEdgePointerDown('top', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag up or down to stretch rows vertically"
+            className="absolute -top-3 left-1/2 -translate-x-1/2 w-9 h-6 flex items-center justify-center cursor-ns-resize hover:scale-110 transition-transform z-50 pointer-events-auto touch-none"
+          >
+            <div className="w-7 h-2.5 rounded-full bg-white dark:bg-slate-900 border-2 border-indigo-600 shadow-md flex items-center justify-center">
+              <div className="w-3.5 h-0.5 bg-indigo-600 rounded-full" />
+            </div>
+          </div>
+
+          {/* BOTTOM EDGE STRETCH HANDLE (Stretch Down Only) */}
+          <div
+            data-testid="grid-stretch-bottom"
+            onPointerDown={(e) => handleEdgePointerDown('bottom', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag up or down to stretch rows vertically"
+            className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-9 h-6 flex items-center justify-center cursor-ns-resize hover:scale-110 transition-transform z-50 pointer-events-auto touch-none"
+          >
+            <div className="w-7 h-2.5 rounded-full bg-white dark:bg-slate-900 border-2 border-indigo-600 shadow-md flex items-center justify-center">
+              <div className="w-3.5 h-0.5 bg-indigo-600 rounded-full" />
+            </div>
+          </div>
+
+          {/* LEFT EDGE STRETCH HANDLE (Stretch Left Only) */}
+          <div
+            data-testid="grid-stretch-left"
+            onPointerDown={(e) => handleEdgePointerDown('left', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag left or right to stretch columns horizontally"
+            className="absolute -left-3 top-1/2 -translate-y-1/2 w-6 h-9 flex items-center justify-center cursor-ew-resize hover:scale-110 transition-transform z-50 pointer-events-auto touch-none"
+          >
+            <div className="w-2.5 h-7 rounded-full bg-white dark:bg-slate-900 border-2 border-indigo-600 shadow-md flex items-center justify-center">
+              <div className="w-0.5 h-3.5 bg-indigo-600 rounded-full" />
+            </div>
+          </div>
+
+          {/* RIGHT EDGE STRETCH HANDLE (Stretch Right Only) */}
+          <div
+            data-testid="grid-stretch-right"
+            onPointerDown={(e) => handleEdgePointerDown('right', e)}
+            onClick={(e) => e.stopPropagation()}
+            title="Drag left or right to stretch columns horizontally"
+            className="absolute -right-3 top-1/2 -translate-y-1/2 w-6 h-9 flex items-center justify-center cursor-ew-resize hover:scale-110 transition-transform z-50 pointer-events-auto touch-none"
+          >
+            <div className="w-2.5 h-7 rounded-full bg-white dark:bg-slate-900 border-2 border-indigo-600 shadow-md flex items-center justify-center">
+              <div className="w-0.5 h-3.5 bg-indigo-600 rounded-full" />
             </div>
           </div>
 

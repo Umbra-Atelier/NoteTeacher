@@ -229,6 +229,38 @@ export function hexWithAlphaPercent(hex: string, opacityPercent: number): string
   return `#${clean.toUpperCase()}${alphaByte}`;
 }
 
+/**
+ * Boosts any chosen hex color into a super-bright, high-contrast highlighter tone
+ * so every color in the palette/rainbow produces luminous, vivid highlights.
+ */
+export function getBrightHighlighterColor(hex: string): string {
+  const { h, s, l } = hexToHsl(hex);
+  if (s < 8) {
+    return hslToHex(205, 45, 84);
+  }
+  const isCoolDarkHue = (h >= 210 && h <= 300) || h <= 15 || h >= 340;
+  const targetL = isCoolDarkHue
+    ? Math.max(67, Math.min(75, l))
+    : Math.max(58, Math.min(72, l));
+  const targetS = Math.max(94, Math.min(100, s));
+  return hslToHex(h, targetS, targetL);
+}
+
+/**
+ * Computes the bounded color-dodge tint for highlighter Pass 1:
+ * lifts white, cream, and gray backgrounds toward super-bright white
+ * while keeping dark ink & colored elements dark and saturated.
+ */
+export function getHighlighterDodgeColor(brightHex: string): string {
+  const { r, g, b } = hexToRgb(brightHex);
+  const toHex = (ch: number) =>
+    Math.round(Math.max(0, Math.min(1, 0.18 + 0.18 * (ch / 255))) * 255)
+      .toString(16)
+      .padStart(2, '0')
+      .toUpperCase();
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
 // Preset quick classroom teaching colors
 export const CLASSROOM_PRESET_COLORS = [
   '#0F172A', // Slate Black (Writing)

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Trash2, ChevronDown, ChevronUp, Check, Type } from 'lucide-react';
 import { CanvasStroke, DictatedTextBox, GeometricShape } from '../types';
 import { clampBoxToViewport } from './ViewportPortalPopup';
+import { getBrightHighlighterColor } from '../utils/colorUtils';
 
 interface GhostEraserPromptProps {
   ghostedStrokes?: CanvasStroke[];
@@ -303,7 +304,8 @@ export const GhostEraserPrompt: React.FC<GhostEraserPromptProps> = ({
                   <svg viewBox={getStrokeViewBox(s)} className="w-full h-full p-1 pointer-events-none">
                     <path
                       d={strokeToPathD(s)}
-                      stroke={s.color}
+                      stroke={s.tool === 'highlighter' ? getBrightHighlighterColor(s.color) : s.color}
+                      strokeOpacity={s.tool === 'highlighter' ? Math.max(0.75, s.opacity || 0.75) : 1}
                       strokeWidth={Math.max(2, s.width)}
                       fill="none"
                       strokeLinecap="round"
